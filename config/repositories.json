@@ -5,8 +5,9 @@
       "revision": "master",
       "directory": "HiggsDNA",
       "environment_file": "environment.yml",
-      "install_extras": "dev",
-      "import_name": "higgs_dna"
+      "import_name": "higgs_dna",
+      "pip_no_dependencies": true,
+      "pip_no_build_isolation": true
     }
   }
 }

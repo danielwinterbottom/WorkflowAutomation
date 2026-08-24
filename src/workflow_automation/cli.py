@@ -35,6 +35,8 @@ class Repository:
     environment_file: str | None = None
     install_extras: str | None = None
     import_name: str | None = None
+    pip_no_dependencies: bool = False
+    pip_no_build_isolation: bool = False
 
 
 def path_summary(path: Path) -> dict[str, object]:
@@ -225,6 +227,8 @@ def load_repositories(config_path: Path) -> list[Repository]:
                     environment_file=values.get("environment_file"),
                     install_extras=values.get("install_extras"),
                     import_name=values.get("import_name"),
+                    pip_no_dependencies=values.get("pip_no_dependencies", False),
+                    pip_no_build_isolation=values.get("pip_no_build_isolation", False),
                 )
             )
         except KeyError as exc:
@@ -377,7 +381,13 @@ def prepare_environment(repository: Repository, workspace: Path, environment_roo
     if repository.install_extras:
         install_target += f"[{repository.install_extras}]"
     print(f"[install] {repository.name}: editable {install_target}")
-    run_program([str(python), "-m", "pip", "install", "--editable", install_target], cwd=checkout)
+    install_command = [str(python), "-m", "pip", "install"]
+    if repository.pip_no_build_isolation:
+        install_command.append("--no-build-isolation")
+    if repository.pip_no_dependencies:
+        install_command.append("--no-deps")
+    install_command.extend(["--editable", install_target])
+    run_program(install_command, cwd=checkout)
     if not validate_environment(repository, checkout, prefix):
         raise BootstrapError(
             f"environment validation failed: {prefix} cannot import "

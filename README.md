@@ -26,8 +26,10 @@ law run workflow_automation.tasks.RepositoryEnvironment \
 
 `RepositoryEnvironment` depends on `RepositoryCheckout`, so cloning happens automatically when
 needed. Definitions live in `config/repositories.json`; future repositories use the same tasks and
-remain independent of HiggsDNA. The dependency-free `./workflow bootstrap` command remains
-available for recovery before the controller exists.
+remain independent of HiggsDNA. For HiggsDNA, Conda resolves dependencies from `environment.yml`
+and pip only links the checkout editable, avoiding a second incompatible dependency-resolution
+pass. The dependency-free `./workflow bootstrap` command remains available for recovery before the
+controller exists.
 
 ## Choose a cluster workspace
 
