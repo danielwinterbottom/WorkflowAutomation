@@ -3,7 +3,10 @@
     "HiggsDNA": {
       "url": "https://gitlab.cern.ch/dwinterb/HiggsDNA.git",
       "revision": "master",
-      "directory": "HiggsDNA"
+      "directory": "HiggsDNA",
+      "environment_file": "environment.yml",
+      "install_extras": "dev",
+      "import_name": "higgs_dna"
     }
   }
 }

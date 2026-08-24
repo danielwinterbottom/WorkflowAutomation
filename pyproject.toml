@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflow-automation"
+version = "0.1.0"
+description = "Law-based orchestration for independently managed analysis repositories"
+requires-python = ">=3.9"
+dependencies = [
+  "law",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
