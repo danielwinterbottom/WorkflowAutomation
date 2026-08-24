@@ -1,0 +1,9 @@
+{
+  "repositories": {
+    "HiggsDNA": {
+      "url": "https://gitlab.cern.ch/dwinterb/HiggsDNA.git",
+      "revision": "master",
+      "directory": "HiggsDNA"
+    }
+  }
+}
