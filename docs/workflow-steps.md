@@ -201,12 +201,12 @@ law run workflow_automation.tasks.RepositoryEnvironment \
   --local-scheduler
 ```
 
-The generic task reads its installation policy from the selected repository configuration. For
-HiggsDNA it prefers Mamba, falls back to Conda, and creates the prefix from `environment.yml`.
-Conda owns dependency resolution; pip then links only the checkout itself using editable,
-`--no-deps`, and `--no-build-isolation`. This prevents pip from independently selecting legacy
-packages incompatible with the environment's Python. Finally, the task checks that `higgs_dna`
-resolves to the managed checkout. A valid environment makes the task complete without reinstalling.
+The generic task reads `environment_file`, `install_extras`, and `import_name` from the selected
+repository configuration. For HiggsDNA it prefers Mamba, falls back to Conda, creates the prefix
+from `environment.yml`, installs `.[dev]` editable, and checks that `higgs_dna` resolves to the
+managed checkout. HiggsDNA's environment definition pins a Python and NumPy generation compatible
+with its legacy `coffea<2023` stack. A valid environment makes the task complete without
+reinstalling.
 
 ### Manual equivalent for HiggsDNA
 
@@ -228,11 +228,8 @@ mamba env create \
 Or replace `mamba` with `conda`. Then install and validate:
 
 ```bash
-cd "$HIGGSDNA_CHECKOUT"
 "$HIGGSDNA_ENV/bin/python" -m pip install \
-  --no-build-isolation \
-  --no-deps \
-  --editable .
+  --editable "$HIGGSDNA_CHECKOUT[dev]"
 "$HIGGSDNA_ENV/bin/python" -c \
   'import higgs_dna; print(higgs_dna.__file__)'
 ```
@@ -248,7 +245,7 @@ it aside manually when safe before retrying. Neither the task nor launcher delet
 ## Adding another repository
 
 Add an entry to `config/repositories.json` with its URL, revision, checkout directory, environment
-file, validation import, and pip installation policy. Then select it with the same generic task:
+file, editable-install extras, and validation import. Then select it with the same generic task:
 
 ```bash
 law run workflow_automation.tasks.RepositoryEnvironment \

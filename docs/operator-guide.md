@@ -42,8 +42,8 @@ law run workflow_automation.tasks.RepositoryEnvironment \
 
 The task requires the generic checkout task and creates the Conda prefix at
 `workspaces/.environments/HiggsDNA`. Other repository workflows declare their own dependencies and
-do not implicitly require HiggsDNA. HiggsDNA dependencies are resolved once by Conda; its subsequent
-editable pip installation uses `--no-deps --no-build-isolation`.
+do not implicitly require HiggsDNA. HiggsDNA's environment definition constrains Python and NumPy
+to versions compatible with its `coffea<2023` dependency.
 
 ## Cluster setup
 

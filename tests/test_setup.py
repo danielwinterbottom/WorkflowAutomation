@@ -24,9 +24,8 @@ class SetupTests(unittest.TestCase):
             revision="main",
             directory="Example",
             environment_file="environment.yml",
+            install_extras="dev",
             import_name="example_package",
-            pip_no_dependencies=True,
-            pip_no_build_isolation=True,
         )
 
     def tearDown(self) -> None:
@@ -55,9 +54,7 @@ class SetupTests(unittest.TestCase):
         install_calls = [call for call, _ in calls if call[1:4] == ["-m", "pip", "install"]]
         self.assertEqual(len(create_calls), 1)
         self.assertEqual(len(install_calls), 1)
-        self.assertEqual(install_calls[0][-1], ".")
-        self.assertIn("--no-deps", install_calls[0])
-        self.assertIn("--no-build-isolation", install_calls[0])
+        self.assertEqual(install_calls[0][-1], ".[dev]")
 
     def test_refuses_incomplete_existing_prefix(self) -> None:
         self.prefix.mkdir(parents=True)
