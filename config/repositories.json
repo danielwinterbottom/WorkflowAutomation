@@ -2,7 +2,7 @@
   "repositories": {
     "HiggsDNA": {
       "url": "https://gitlab.cern.ch/dwinterb/HiggsDNA.git",
-      "revision": "master",
+      "revision": "workflowautomation",
       "directory": "HiggsDNA",
       "environment_file": "environment.yml",
       "install_extras": "dev",

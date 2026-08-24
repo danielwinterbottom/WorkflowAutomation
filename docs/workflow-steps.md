@@ -151,7 +151,7 @@ Read current values from `config/repositories.json`, then run:
 ```bash
 mkdir -p workspaces
 git clone \
-  --branch master \
+  --branch workflowautomation \
   --single-branch \
   https://gitlab.cern.ch/dwinterb/HiggsDNA.git \
   workspaces/HiggsDNA
@@ -174,6 +174,23 @@ git -C workspaces/HiggsDNA rev-parse --verify HEAD
 
 An existing non-Git directory, invalid checkout, or unexpected origin requires manual inspection.
 Move it aside only after confirming that doing so is safe.
+
+To test the complete dependency chain from scratch without touching an existing checkout or
+environment, select a new empty workspace. The configured HiggsDNA revision is cloned automatically:
+
+```bash
+SCRATCH_WORKSPACE=/vols/cms/dw515/WorkflowAutomation-scratch/workspaces
+
+test ! -e "$SCRATCH_WORKSPACE" && echo "scratch workspace is unused"
+
+law run workflow_automation.tasks.RepositoryEnvironment \
+  --repository HiggsDNA \
+  --workspace "$SCRATCH_WORKSPACE" \
+  --local-scheduler
+```
+
+Do not reuse a path unless you have inspected it. A successful scratch run creates both
+`$SCRATCH_WORKSPACE/HiggsDNA` and `$SCRATCH_WORKSPACE/.environments/HiggsDNA`.
 
 ## Step 4: prepare a repository environment with `law`
 

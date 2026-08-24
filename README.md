@@ -29,6 +29,10 @@ needed. Definitions live in `config/repositories.json`; future repositories use 
 remain independent of HiggsDNA. The dependency-free `./workflow bootstrap` command remains
 available for recovery before the controller exists.
 
+For a completely fresh integration test, pass a new empty `--workspace` path. This forces the task
+graph to clone the configured repository revision and create its environment from nothing; see the
+[workflow steps guide](docs/workflow-steps.md) for the cluster command.
+
 ## Choose a cluster workspace
 
 Repository checkouts and their environments are stored under `workspaces/` by default. This
