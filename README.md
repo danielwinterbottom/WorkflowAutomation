@@ -29,6 +29,34 @@ needed. Definitions live in `config/repositories.json`; future repositories use 
 remain independent of HiggsDNA. The dependency-free `./workflow bootstrap` command remains
 available for recovery before the controller exists.
 
+## Choose a cluster workspace
+
+Repository checkouts and their environments are stored under `workspaces/` by default. This
+directory is ignored by Git. On the group cluster, use a durable user-owned directory rather than
+`/tmp` or a login-node-local filesystem. The recommended convention is:
+
+```text
+/vols/cms/<username>/WorkflowAutomation/workspaces
+```
+
+For example, when WorkflowAutomation is checked out at `/vols/cms/dw515/WorkflowAutomation`:
+
+```bash
+WORKSPACE=/vols/cms/dw515/WorkflowAutomation/workspaces
+
+./workflow diagnose --workspace "$WORKSPACE"
+
+law run workflow_automation.tasks.RepositoryEnvironment \
+  --repository HiggsDNA \
+  --workspace "$WORKSPACE" \
+  --local-scheduler
+```
+
+This creates the checkout at `$WORKSPACE/HiggsDNA` and its isolated environment at
+`$WORKSPACE/.environments/HiggsDNA`. Use a genuinely shared group directory only when multiple
+users need it and its ownership, permissions, and update policy have been agreed; user-owned Conda
+environments are the safer default.
+
 ## Read-only environment diagnostics
 
 Inspect local or cluster prerequisites without changing the filesystem, contacting the scheduler,
