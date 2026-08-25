@@ -27,6 +27,7 @@ class SetupTests(unittest.TestCase):
             environment_file="environment.yml",
             install_extras="dev",
             import_name="example_package",
+            validation_imports=("pkg_resources", "uproot"),
         )
 
     def tearDown(self) -> None:
@@ -56,6 +57,9 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(len(create_calls), 1)
         self.assertEqual(len(install_calls), 1)
         self.assertEqual(install_calls[0][-1], ".[dev]")
+        validation_commands = [call for call, _ in calls if call[1:2] == ["-c"]]
+        self.assertTrue(any(call[-1] == "import pkg_resources" for call in validation_commands))
+        self.assertTrue(any(call[-1] == "import uproot" for call in validation_commands))
 
     def test_refuses_incomplete_existing_prefix(self) -> None:
         self.prefix.mkdir(parents=True)

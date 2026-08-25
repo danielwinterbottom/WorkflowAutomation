@@ -36,6 +36,7 @@ class Repository:
     environment_file: str | None = None
     install_extras: str | None = None
     import_name: str | None = None
+    validation_imports: tuple[str, ...] = ()
 
 
 def path_summary(path: Path) -> dict[str, object]:
@@ -239,6 +240,7 @@ def load_repositories(config_path: Path) -> list[Repository]:
                     environment_file=values.get("environment_file"),
                     install_extras=values.get("install_extras"),
                     import_name=values.get("import_name"),
+                    validation_imports=tuple(values.get("validation_imports", ())),
                 )
             )
         except KeyError as exc:
@@ -405,6 +407,11 @@ def validate_environment(repository: Repository, checkout: Path, prefix: Path) -
         Path(module_path).resolve().relative_to(checkout.resolve())
     except (OSError, ValueError):
         return False
+    for import_name in repository.validation_imports:
+        try:
+            run_program([str(python), "-c", f"import {import_name}"])
+        except BootstrapError:
+            return False
     return True
 
 

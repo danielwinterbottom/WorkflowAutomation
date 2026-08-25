@@ -81,6 +81,11 @@ channels and Python package indexes. If creation fails, the task reports the pos
 and stops. Inspect it, move it aside when safe, and rerun the task; it never deletes or overwrites
 an incomplete prefix automatically.
 
+Repository configuration may declare additional `validation_imports`. HiggsDNA validates
+`pkg_resources` and `uproot` as well as the editable `higgs_dna` import, ensuring the legacy runtime
+is usable rather than merely installed. Its package metadata constrains Setuptools to 70.1.1 because
+Setuptools 82 and later no longer provide the `pkg_resources` API required by this Uproot version.
+
 ## Read-only cluster diagnostics
 
 Run diagnostics from the WorkflowAutomation checkout before bootstrapping or after logging into a

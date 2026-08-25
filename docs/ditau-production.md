@@ -219,6 +219,10 @@ submission record before WorkflowAutomation writes its stable receipt. If the pr
 or the record is ambiguous, the intent remains and blocks automatic retry; inspect Condor and
 reconcile manually to prevent duplicate jobs. There is no automatic resubmission.
 
+Readiness also starts the HiggsDNA analysis entry point with `--help`. This imports its runtime
+dependencies without processing data or reaching Condor, catching failures such as missing
+`pkg_resources` before an intent is created.
+
 ## Implemented dependency graph
 
 ```text

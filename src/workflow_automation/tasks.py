@@ -651,6 +651,11 @@ class DitauEffectiveEventReadiness(law.Task):
         return json.loads(Path(self.requires().output().path).read_text())
 
     def prerequisites_ready(self) -> bool:
+        try:
+            command = self.plan()["commands"][0]
+            run_program([command["argv"][0], command["argv"][1], "--help"], cwd=Path(command["cwd"]))
+        except (BootstrapError, KeyError, IndexError, OSError):
+            return False
         return (
             GridCredentialCheck().complete()
             and shutil.which("condor_submit") is not None
@@ -690,6 +695,10 @@ class DitauEffectiveEventReadiness(law.Task):
                 or argv[argv.index("--executor") + 1] != "imperial_condor"
             ):
                 raise BootstrapError("effective-event command failed executor validation")
+        run_program(
+            [commands[0]["argv"][0], commands[0]["argv"][1], "--help"],
+            cwd=Path(commands[0]["cwd"]),
+        )
         report = {
             "schema_version": 1,
             "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -700,6 +709,7 @@ class DitauEffectiveEventReadiness(law.Task):
                 "checkout_and_environment": True,
                 "sample_manifest": True,
                 "analysis_configs": True,
+                "analysis_entrypoint": True,
                 "cms_proxy": True,
                 "condor_submit": True,
                 "condor_q": True,
