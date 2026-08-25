@@ -77,6 +77,8 @@ class RepositoryEnvironment(RepositoryTask):
         )
 
     def complete(self) -> bool:
+        if not self.requires().complete():
+            return False
         repository = self.repository_config()
         checkout = self.workspace_path() / repository.directory
         prefix = self.environment_root_path() / repository.directory

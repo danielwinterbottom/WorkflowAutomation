@@ -1,7 +1,21 @@
 import unittest
 from unittest.mock import patch
 
-from workflow_automation.tasks import DitauProductionPlan, RepositoryEnvironment
+from workflow_automation.tasks import (
+    DitauProductionPlan,
+    RepositoryCheckout,
+    RepositoryEnvironment,
+)
+
+
+class RepositoryEnvironmentTests(unittest.TestCase):
+    def test_is_incomplete_when_checkout_is_not_current(self):
+        task = RepositoryEnvironment(repository="HiggsDNA")
+
+        with patch.object(RepositoryCheckout, "complete", return_value=False), patch(
+            "workflow_automation.tasks.validate_environment", return_value=True
+        ):
+            self.assertFalse(task.complete())
 
 
 class DitauProductionPlanTests(unittest.TestCase):
