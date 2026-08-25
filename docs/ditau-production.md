@@ -10,11 +10,18 @@ but no task currently executes an analysis command or submits jobs.
 
 - Production: `cp_2022_test`
 - Analysis type: CP
+- Input snapshot: `2026-08-25`
 - Era: `Run3_2022`
 - Channels for analysis, ROOT conversion, and merging: `tt`, `et`, `mt`
 - Output: `output/cp_2022_test`
 
 Additional eras will be appended to the `eras` list only after the 2022 workflow is validated.
+
+`input_snapshot` labels the intended remote dCache file-list snapshot. Change it when files are
+added, removed, replaced, or renamed inside an otherwise unchanged remote directory. Changes to
+configured sample names, paths, or discovery code are detected automatically; remote contents are
+not visible without another dCache query. Changing this label invalidates sample discovery and all
+downstream products.
 
 ## Grid credential prerequisite
 
@@ -179,27 +186,62 @@ HiggsDNA analysis configuration, and HiggsDNA commit. Any change makes it incomp
 planning—not submission—to run again. It also records and validates the SHA-256 hash of both
 generated analysis configurations.
 
+## Readiness and explicitly gated submission
+
+Run the readiness task first. It validates the plan, configurations, sample receipt, pinned checkout,
+environment, proxy, and availability of `condor_submit` and `condor_q`; it submits nothing:
+
+```bash
+law run workflow_automation.tasks.DitauEffectiveEventReadiness \
+  --production cp_2022_test \
+  --era Run3_2022 \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+Inspect `effective-events/Run3_2022/readiness.json`. Submission tasks refuse to run without the
+explicit operator flag. After reviewing both the plan and readiness report, submit both trees with
+one worker:
+
+```bash
+law run workflow_automation.tasks.DitauEffectiveEventSubmissions \
+  --production cp_2022_test \
+  --era Run3_2022 \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --allow-submission \
+  --workers 1 \
+  --local-scheduler
+```
+
+This is the only documented automated submission path. Each tree writes a durable intent before
+invoking HiggsDNA. A successful command must create or change exactly one matching HiggsDNA
+submission record before WorkflowAutomation writes its stable receipt. If the process is interrupted
+or the record is ambiguous, the intent remains and blocks automatic retry; inspect Condor and
+reconcile manually to prevent duplicate jobs. There is no automatic resubmission.
+
 ## Implemented dependency graph
 
 ```text
-DitauEffectiveEventPlan(cp_2022_test, Run3_2022)
-└── DitauInputPreparation(cp_2022_test)
-    ├── DitauProductionPlan(cp_2022_test)
-    │   └── RepositoryEnvironment(HiggsDNA)
-    │       └── RepositoryCheckout(HiggsDNA)
-    └── DitauSampleManifest(cp_2022_test, Run3_2022)
-        ├── RepositoryEnvironment(HiggsDNA)
-        │   └── RepositoryCheckout(HiggsDNA)
-        └── GridCredentialCheck
+DitauEffectiveEventSubmissions(cp_2022_test, Run3_2022)
+├── DitauEffectiveEventSubmission(Events)
+└── DitauEffectiveEventSubmission(EventsNotSelected)
+    └── DitauEffectiveEventReadiness
+        └── DitauEffectiveEventPlan
+            └── DitauInputPreparation
+                ├── DitauProductionPlan
+                └── DitauSampleManifest
+                    ├── RepositoryEnvironment
+                    │   └── RepositoryCheckout
+                    └── GridCredentialCheck
 ```
 
 `GridCredentialCheck` is read-only. It requires `voms-proxy-info --exists --valid 5:00` to succeed
 and otherwise stops with manual proxy instructions.
 
-The next planned chain after `DitauEffectiveEventPlan` is:
+The next planned chain after submission is:
 
 ```text
-EffectiveEventSubmission
+EffectiveEventJobStatus (read-only)
 └── EffectiveEventCollection
     └── StitchingConfiguration
         └── ParameterConfiguration
@@ -208,8 +250,7 @@ EffectiveEventSubmission
                     └── ROOTMerge(channel)
 ```
 
-None of these tasks is implemented yet. The plan describes effective-event submissions, but no task
-can execute them.
+None of these post-submission tasks is implemented yet.
 
 Job checking and resubmission will be distinct tasks. A status check must remain read-only;
 resubmission will require an explicit operator opt-in.

@@ -2,6 +2,7 @@
   "productions": {
     "cp_2022_test": {
       "analysis_type": "cp",
+      "input_snapshot": "2026-08-25",
       "eras": ["Run3_2022"],
       "channels": ["tt", "et", "mt"],
       "output": "output/cp_2022_test",

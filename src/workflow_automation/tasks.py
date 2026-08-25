@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,6 +194,7 @@ class DitauSampleManifest(law.Task):
             json.dumps(
                 {
                     "analysis_type": production["analysis_type"],
+                    "input_snapshot": production["input_snapshot"],
                     "channels": production["channels"],
                     "era": str(self.era),
                 },
@@ -261,6 +263,7 @@ class DitauSampleManifest(law.Task):
             "production": str(self.production),
             "era": str(self.era),
             "analysis_type": production["analysis_type"],
+            "input_snapshot": production["input_snapshot"],
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "higgsdna_commit": run_git(["rev-parse", "HEAD"], cwd=checkout),
             "input_fingerprint": self.current_fingerprint(),
@@ -619,3 +622,247 @@ class DitauEffectiveEventPlan(law.Task):
         self.output().dump(
             json.dumps(plan, indent=2, sort_keys=True) + "\n", formatter="text"
         )
+
+
+class DitauEffectiveEventReadiness(law.Task):
+    """Validate effective-event submission prerequisites without submitting."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauEffectiveEventPlan:
+        return DitauEffectiveEventPlan(
+            production=self.production,
+            era=self.era,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.requires().state_dir() / "readiness.json"))
+
+    def plan(self) -> dict[str, object]:
+        return json.loads(Path(self.requires().output().path).read_text())
+
+    def prerequisites_ready(self) -> bool:
+        return (
+            GridCredentialCheck().complete()
+            and shutil.which("condor_submit") is not None
+            and shutil.which("condor_q") is not None
+        )
+
+    def complete(self) -> bool:
+        if not self.requires().complete() or not self.prerequisites_ready():
+            return False
+        if not self.output().exists():
+            return False
+        try:
+            report = json.loads(Path(self.output().path).read_text())
+            plan = self.plan()
+            return report["plan_fingerprint"] == plan["input_fingerprint"]
+        except (KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        missing = [name for name in ("condor_submit", "condor_q") if not shutil.which(name)]
+        if missing:
+            raise BootstrapError(f"missing HTCondor tools: {', '.join(missing)}")
+        if not GridCredentialCheck().complete():
+            raise BootstrapError("a CMS proxy valid for at least 5 hours is required")
+        plan = self.plan()
+        commands = plan["commands"]
+        if plan.get("submission_enabled") is not False or len(commands) != 2:
+            raise BootstrapError("effective-event plan has an unexpected safety state")
+        expected_trees = {"Events", "EventsNotSelected"}
+        if {command.get("tree") for command in commands} != expected_trees:
+            raise BootstrapError("effective-event plan does not contain exactly the two trees")
+        for command in commands:
+            argv = command["argv"]
+            if (
+                not command.get("submits_jobs")
+                or "--executor" not in argv
+                or argv[argv.index("--executor") + 1] != "imperial_condor"
+            ):
+                raise BootstrapError("effective-event command failed executor validation")
+        report = {
+            "schema_version": 1,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "plan_fingerprint": plan["input_fingerprint"],
+            "checks": {
+                "checkout_and_environment": True,
+                "sample_manifest": True,
+                "analysis_configs": True,
+                "cms_proxy": True,
+                "condor_submit": True,
+                "condor_q": True,
+                "submission_enabled": False,
+            },
+        }
+        self.output().dump(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+
+
+class DitauEffectiveEventSubmission(law.Task):
+    """Explicitly submit one effective-event tree with interruption protection."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    tree = luigi.ChoiceParameter(choices=("Events", "EventsNotSelected"))
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauEffectiveEventReadiness:
+        return DitauEffectiveEventReadiness(
+            production=self.production,
+            era=self.era,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        state = self.requires().requires().state_dir()
+        return law.LocalFileTarget(str(state / "submission-receipts" / f"{self.tree}.json"))
+
+    def intent_path(self) -> Path:
+        return self.requires().requires().state_dir() / "submission-intents" / f"{self.tree}.json"
+
+    def plan(self) -> dict[str, object]:
+        return self.requires().plan()
+
+    def command(self) -> dict[str, object]:
+        matches = [item for item in self.plan()["commands"] if item["tree"] == self.tree]
+        if len(matches) != 1:
+            raise BootstrapError(f"plan has no unique command for tree {self.tree}")
+        return matches[0]
+
+    def command_fingerprint(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.command(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def complete(self) -> bool:
+        if not self.output().exists():
+            return False
+        try:
+            receipt = json.loads(Path(self.output().path).read_text())
+            plan = self.plan()
+            record = Path(receipt["submission_record"])
+            return (
+                receipt["plan_fingerprint"] == plan["input_fingerprint"]
+                and receipt["command_fingerprint"] == self.command_fingerprint()
+                and record.is_file()
+                and sha256_file(record) == receipt["submission_record_sha256"]
+            )
+        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        if not self.allow_submission:
+            raise BootstrapError(
+                "submission is disabled; rerun with --allow-submission only after reviewing plan.json"
+            )
+        if not self.requires().complete():
+            raise BootstrapError("effective-event submission readiness is no longer valid")
+        intent = self.intent_path()
+        if intent.exists():
+            raise BootstrapError(
+                f"submission intent already exists at {intent}; inspect Condor and reconcile it "
+                "manually before any retry"
+            )
+        command = self.command()
+        command_fingerprint = self.command_fingerprint()
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        temporary = intent.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "tree": str(self.tree),
+                    "plan_fingerprint": self.plan()["input_fingerprint"],
+                    "command_fingerprint": command_fingerprint,
+                    "status": "started",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, intent)
+
+        manifest_dir_index = command["argv"].index("--submission-manifest-dir") + 1
+        manifest_dir = Path(command["argv"][manifest_dir_index])
+        pattern = f"*__{self.era}__tt__{self.tree}.json"
+        before = {
+            path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
+        }
+        run_program(command["argv"], cwd=Path(command["cwd"]))
+        after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
+        changed = [path for path in after if before.get(path) != sha256_file(path)]
+        if len(changed) != 1:
+            raise BootstrapError(
+                f"submission command returned but found {len(changed)} new or changed records; "
+                f"intent retained at {intent} for manual reconciliation"
+            )
+        record = changed[0].resolve()
+        receipt = {
+            "schema_version": 1,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "tree": str(self.tree),
+            "plan_fingerprint": self.plan()["input_fingerprint"],
+            "command_fingerprint": command_fingerprint,
+            "submission_record": str(record),
+            "submission_record_sha256": sha256_file(record),
+        }
+        self.output().dump(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+        completed_intent = json.loads(intent.read_text())
+        completed_intent["status"] = "completed"
+        completed_intent["submission_receipt"] = self.output().path
+        intent.write_text(json.dumps(completed_intent, indent=2, sort_keys=True) + "\n")
+
+
+class DitauEffectiveEventSubmissions(law.WrapperTask):
+    """Submit both effective-event trees only with explicit operator opt-in."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> list[DitauEffectiveEventSubmission]:
+        common = {
+            "production": self.production,
+            "era": self.era,
+            "allow_submission": self.allow_submission,
+            "config": self.config,
+            "productions_config": self.productions_config,
+            "workspace": self.workspace,
+            "environment_root": self.environment_root,
+        }
+        return [
+            DitauEffectiveEventSubmission(tree=tree, **common)
+            for tree in ("Events", "EventsNotSelected")
+        ]

@@ -8,6 +8,8 @@ from workflow_automation.cli import Repository
 from workflow_automation.tasks import (
     DitauInputPreparation,
     DitauEffectiveEventPlan,
+    DitauEffectiveEventReadiness,
+    DitauEffectiveEventSubmission,
     DitauProductionPlan,
     DitauSampleManifest,
     GridCredentialCheck,
@@ -56,6 +58,7 @@ class DitauSampleManifestTests(unittest.TestCase):
                         "productions": {
                             "test": {
                                 "analysis_type": "cp",
+                                "input_snapshot": "test-snapshot",
                                 "eras": ["Run3_2022"],
                                 "channels": ["tt", "et", "mt"],
                             }
@@ -195,6 +198,57 @@ class DitauEffectiveEventPlanTests(unittest.TestCase):
                 events = task.state_dir() / "analysis-configs/Events.json"
                 events.write_text("{}\n")
                 self.assertFalse(task.complete())
+
+
+class DitauEffectiveEventSubmissionTests(unittest.TestCase):
+    def test_refuses_to_submit_without_explicit_opt_in(self):
+        task = DitauEffectiveEventSubmission(
+            production="cp_2022_test", era="Run3_2022", tree="Events"
+        )
+
+        with self.assertRaisesRegex(Exception, "submission is disabled"):
+            task.run()
+
+    def test_records_successful_mock_submission_and_completes_intent(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_dir = root / "submission-records"
+            command = {
+                "tree": "Events",
+                "submits_jobs": True,
+                "cwd": str(root),
+                "argv": [
+                    "/fake/python",
+                    "/fake/run_analysis.py",
+                    "--submission-manifest-dir",
+                    str(manifest_dir),
+                ],
+            }
+            plan = {"input_fingerprint": "plan-fingerprint", "commands": [command]}
+            task = DitauEffectiveEventSubmission(
+                production="test",
+                era="Run3_2022",
+                tree="Events",
+                allow_submission=True,
+                workspace=str(root),
+            )
+
+            def fake_run(arguments, cwd=None):
+                manifest_dir.mkdir(parents=True, exist_ok=True)
+                record = manifest_dir / "25_08_2026__Run3_2022__tt__Events.json"
+                record.write_text('{"submitted": true}\n')
+                return ""
+
+            with patch.object(task, "plan", return_value=plan), patch.object(
+                DitauEffectiveEventReadiness, "complete", return_value=True
+            ), patch("workflow_automation.tasks.run_program", side_effect=fake_run):
+                task.run()
+                self.assertTrue(task.complete())
+
+            receipt = json.loads(Path(task.output().path).read_text())
+            self.assertEqual(receipt["tree"], "Events")
+            intent = json.loads(task.intent_path().read_text())
+            self.assertEqual(intent["status"], "completed")
 
 
 class DitauProductionPlanTests(unittest.TestCase):

@@ -332,6 +332,11 @@ This produces separate `Events.json` and `EventsNotSelected.json` configurations
 manually executed, so the plan labels them `submits_jobs: true`; WorkflowAutomation keeps
 `submission_enabled` false and never invokes them.
 
+The separately gated execution task is documented in `ditau-production.md`. It requires a readiness
+report, an explicit `--allow-submission` flag, one worker, and durable per-tree intent and receipt
+files. An interrupted or ambiguous attempt blocks automatic retry. Job-status checking, collection,
+stitching, and parameter generation are not implemented yet.
+
 ## Documentation requirements for future steps
 
 Each new stage must be added here in the same change, including its purpose, prerequisites,
