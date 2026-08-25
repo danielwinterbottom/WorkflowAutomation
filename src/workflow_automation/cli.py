@@ -31,6 +31,7 @@ class Repository:
     name: str
     url: str
     revision: str
+    commit: str
     directory: str
     environment_file: str | None = None
     install_extras: str | None = None
@@ -56,6 +57,7 @@ def repository_summary(repository: Repository, workspace: Path) -> dict[str, obj
         "name": repository.name,
         "path": str(destination),
         "configured_revision": repository.revision,
+        "configured_commit": repository.commit,
         "exists": destination.exists(),
         "git_checkout": (destination / ".git").exists(),
     }
@@ -72,6 +74,10 @@ def repository_summary(repository: Repository, workspace: Path) -> dict[str, obj
                 == normalize_git_url(repository.url),
                 "local_changes": bool(run_git(["status", "--porcelain"], cwd=destination)),
             }
+        )
+        summary["revision_matches"] = (
+            summary["branch"] == repository.revision
+            and summary["commit"] == repository.commit
         )
     except BootstrapError as exc:
         summary["inspection_error"] = str(exc)
@@ -163,11 +169,18 @@ def print_diagnostics(diagnostics: dict[str, object], output_format: str) -> Non
     for repository in repositories:
         assert isinstance(repository, dict)
         state = "absent"
+        detail = ""
         if repository["git_checkout"]:
             state = str(repository.get("commit", "invalid checkout"))[:12]
+            detail = (
+                f", branch={repository.get('branch') or '<detached>'}"
+                f", origin_matches={repository.get('origin_matches', False)}"
+                f", revision_matches={repository.get('revision_matches', False)}"
+                f", local_changes={repository.get('local_changes', False)}"
+            )
         elif repository["exists"]:
             state = "present, not a git checkout"
-        print(f"repository {repository['name']}: {state} ({repository['path']})")
+        print(f"repository {repository['name']}: {state}{detail} ({repository['path']})")
     if "configuration_error" in diagnostics:
         print(f"configuration: {diagnostics['configuration_error']}")
 
@@ -221,6 +234,7 @@ def load_repositories(config_path: Path) -> list[Repository]:
                     name=name,
                     url=values["url"],
                     revision=values["revision"],
+                    commit=values["commit"],
                     directory=values.get("directory", name),
                     environment_file=values.get("environment_file"),
                     install_extras=values.get("install_extras"),
@@ -252,16 +266,70 @@ def validate_existing(repository: Repository, destination: Path) -> str:
         raise BootstrapError(
             f"{destination} has unexpected origin {origin!r}; expected {repository.url!r}"
         )
-    dirty = bool(run_git(["status", "--porcelain"], cwd=destination))
-    state = "with local changes" if dirty else "clean"
-    print(f"[ready] {repository.name}: {destination} ({commit[:12]}, {state})")
     return commit
+
+
+def repository_is_current(repository: Repository, destination: Path) -> bool:
+    """Check configured checkout identity without fetching or changing it."""
+    try:
+        commit = validate_existing(repository, destination)
+        branch = run_git(["branch", "--show-current"], cwd=destination)
+        dirty = bool(run_git(["status", "--porcelain"], cwd=destination))
+    except BootstrapError:
+        return False
+    return not dirty and branch == repository.revision and commit == repository.commit
+
+
+def update_existing(repository: Repository, destination: Path) -> str:
+    """Fast-forward a clean configured branch to its pinned commit."""
+    commit = validate_existing(repository, destination)
+    branch = run_git(["branch", "--show-current"], cwd=destination)
+    dirty = bool(run_git(["status", "--porcelain"], cwd=destination))
+    if dirty:
+        raise BootstrapError(
+            f"{destination} has local changes; commit or move them aside before updating"
+        )
+    if branch != repository.revision:
+        raise BootstrapError(
+            f"{destination} is on branch {branch or '<detached>'!r}; expected "
+            f"{repository.revision!r}. Switch branches explicitly before rerunning setup"
+        )
+    if commit == repository.commit:
+        print(f"[ready] {repository.name}: {destination} ({commit[:12]}, clean)")
+        return commit
+
+    print(
+        f"[update] {repository.name}: {commit[:12]} -> {repository.commit[:12]} "
+        f"on {repository.revision}"
+    )
+    run_git(["fetch", "origin", repository.revision], cwd=destination)
+    try:
+        pinned = run_git(
+            ["rev-parse", "--verify", f"{repository.commit}^{{commit}}"], cwd=destination
+        )
+        run_git(["merge-base", "--is-ancestor", pinned, "FETCH_HEAD"], cwd=destination)
+    except BootstrapError as exc:
+        raise BootstrapError(
+            f"configured commit {repository.commit!r} is not on "
+            f"origin/{repository.revision}; update repositories.json deliberately"
+        ) from exc
+    try:
+        run_git(["merge-base", "--is-ancestor", "HEAD", pinned], cwd=destination)
+    except BootstrapError as exc:
+        raise BootstrapError(
+            f"{destination} cannot be fast-forwarded from {commit[:12]} to {pinned[:12]}; "
+            "inspect the branch manually"
+        ) from exc
+    run_git(["merge", "--ff-only", pinned], cwd=destination)
+    updated = run_git(["rev-parse", "--verify", "HEAD"], cwd=destination)
+    print(f"[ready] {repository.name}: {destination} ({updated[:12]}, clean)")
+    return updated
 
 
 def prepare_repository(repository: Repository, workspace: Path) -> str:
     destination = workspace / repository.directory
     if destination.exists():
-        return validate_existing(repository, destination)
+        return update_existing(repository, destination)
 
     workspace.mkdir(parents=True, exist_ok=True)
     print(f"[clone] {repository.name}: {repository.url} -> {destination}")
@@ -279,6 +347,22 @@ def prepare_repository(repository: Repository, workspace: Path) -> str:
                 str(temporary_directory),
             ]
         )
+        fetched = run_git(["rev-parse", "--verify", "HEAD"], cwd=temporary_directory)
+        try:
+            pinned = run_git(
+                ["rev-parse", "--verify", f"{repository.commit}^{{commit}}"],
+                cwd=temporary_directory,
+            )
+            run_git(["merge-base", "--is-ancestor", pinned, fetched], cwd=temporary_directory)
+        except BootstrapError as exc:
+            raise BootstrapError(
+                f"configured commit {repository.commit!r} is not on "
+                f"origin/{repository.revision}"
+            ) from exc
+        if fetched != pinned:
+            run_git(["checkout", "--detach", pinned], cwd=temporary_directory)
+            run_git(["branch", "--force", repository.revision, pinned], cwd=temporary_directory)
+            run_git(["checkout", repository.revision], cwd=temporary_directory)
         validate_existing(repository, temporary_directory)
         os.replace(temporary_directory, destination)
     finally:

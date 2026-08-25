@@ -135,8 +135,10 @@ law run workflow_automation.tasks.RepositoryCheckout \
   --local-scheduler
 ```
 
-The task clones only a missing checkout. An existing checkout is complete only when it has a valid
-`HEAD` and the configured `origin`. It is never fetched, pulled, reset, or cleaned.
+The configuration names both a branch and an exact approved commit. The task clones a missing
+checkout at that commit. An existing checkout is complete only when its origin, branch, commit, and
+clean working-tree state all match. A clean checkout behind the pin is fetched and fast-forwarded;
+the task never resets, cleans, or overwrites local changes.
 
 The dependency-free bootstrap command remains available for recovery before the controller exists:
 
@@ -150,17 +152,21 @@ Read current values from `config/repositories.json`, then run:
 
 ```bash
 mkdir -p workspaces
-git clone \
+git clone --no-checkout \
   --branch workflowautomation \
   --single-branch \
   https://gitlab.cern.ch/dwinterb/HiggsDNA.git \
   workspaces/HiggsDNA
+git -C workspaces/HiggsDNA checkout --detach 39c5d1a9b7052cad51aaa36d3241b7949f61e693
+git -C workspaces/HiggsDNA branch --force workflowautomation 39c5d1a9b7052cad51aaa36d3241b7949f61e693
+git -C workspaces/HiggsDNA checkout workflowautomation
 ```
 
 Validate without changing the checkout:
 
 ```bash
 git -C workspaces/HiggsDNA rev-parse --verify HEAD
+git -C workspaces/HiggsDNA branch --show-current
 git -C workspaces/HiggsDNA remote get-url origin
 git -C workspaces/HiggsDNA status --porcelain
 ```
@@ -172,7 +178,10 @@ test -d workspaces/HiggsDNA/.git
 git -C workspaces/HiggsDNA rev-parse --verify HEAD
 ```
 
-An existing non-Git directory, invalid checkout, or unexpected origin requires manual inspection.
+An existing non-Git directory, invalid checkout, unexpected origin, wrong branch, ahead/diverged
+history, or local changes requires manual inspection. When intentionally approving a newer
+HiggsDNA version, update the full `commit` value in `config/repositories.json`, review it, and commit
+that WorkflowAutomation change. The branch name alone is not a reproducibility boundary.
 Move it aside only after confirming that doing so is safe.
 
 To test the complete dependency chain from scratch without touching an existing checkout or
@@ -221,8 +230,8 @@ law run workflow_automation.tasks.RepositoryEnvironment \
 The generic task reads `environment_file`, `install_extras`, and `import_name` from the selected
 repository configuration. For HiggsDNA it prefers Mamba, falls back to Conda, creates the prefix
 from `environment.yml`, installs `.[dev]` editable, and checks that `higgs_dna` resolves to the
-managed checkout. HiggsDNA's environment definition pins a Python and NumPy generation compatible
-with its legacy `coffea<2023` stack. A valid environment makes the task complete without
+managed checkout. HiggsDNA's environment definition pins Python 3.11 for compatibility with the
+known working legacy `coffea` stack. A valid environment makes the task complete without
 reinstalling.
 
 ### Manual equivalent for HiggsDNA
@@ -261,8 +270,9 @@ it aside manually when safe before retrying. Neither the task nor launcher delet
 
 ## Adding another repository
 
-Add an entry to `config/repositories.json` with its URL, revision, checkout directory, environment
-file, editable-install extras, and validation import. Then select it with the same generic task:
+Add an entry to `config/repositories.json` with its URL, branch revision, exact approved commit,
+checkout directory, environment file, editable-install extras, and validation import. Then select
+it with the same generic task:
 
 ```bash
 law run workflow_automation.tasks.RepositoryEnvironment \

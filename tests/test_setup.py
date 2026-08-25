@@ -22,6 +22,7 @@ class SetupTests(unittest.TestCase):
             name="Example",
             url="https://example.invalid/example.git",
             revision="main",
+            commit="0" * 40,
             directory="Example",
             environment_file="environment.yml",
             install_extras="dev",

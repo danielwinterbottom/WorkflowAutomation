@@ -23,6 +23,7 @@ class DiagnosticsTests(unittest.TestCase):
                             "example": {
                                 "url": "https://example.invalid/repository.git",
                                 "revision": "main",
+                                "commit": "0" * 40,
                             }
                         }
                     }

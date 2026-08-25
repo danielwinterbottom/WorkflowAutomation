@@ -30,8 +30,8 @@ remain independent of HiggsDNA. The dependency-free `./workflow bootstrap` comma
 available for recovery before the controller exists.
 
 For a completely fresh integration test, pass a new empty `--workspace` path. This forces the task
-graph to clone the configured repository revision and create its environment from nothing; see the
-[workflow steps guide](docs/workflow-steps.md) for the cluster command.
+graph to clone the configured branch at its exact approved commit and create its environment from
+nothing; see the [workflow steps guide](docs/workflow-steps.md) for the cluster command.
 
 ## Choose a cluster workspace
 

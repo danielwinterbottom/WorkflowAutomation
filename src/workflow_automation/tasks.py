@@ -15,9 +15,9 @@ from workflow_automation.cli import (
     BootstrapError,
     Repository,
     load_repositories,
-    normalize_git_url,
     prepare_environment,
     prepare_repository,
+    repository_is_current,
     run_git,
     validate_environment,
 )
@@ -59,14 +59,7 @@ class RepositoryCheckout(RepositoryTask):
     def complete(self) -> bool:
         repository = self.repository_config()
         checkout = self.workspace_path() / repository.directory
-        if not (checkout / ".git").exists():
-            return False
-        try:
-            run_git(["rev-parse", "--verify", "HEAD"], cwd=checkout)
-            origin = run_git(["remote", "get-url", "origin"], cwd=checkout)
-        except BootstrapError:
-            return False
-        return normalize_git_url(origin) == normalize_git_url(repository.url)
+        return repository_is_current(repository, checkout)
 
     def run(self) -> None:
         prepare_repository(self.repository_config(), self.workspace_path())

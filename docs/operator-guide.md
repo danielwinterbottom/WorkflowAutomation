@@ -42,8 +42,8 @@ law run workflow_automation.tasks.RepositoryEnvironment \
 
 The task requires the generic checkout task and creates the Conda prefix at
 `workspaces/.environments/HiggsDNA`. Other repository workflows declare their own dependencies and
-do not implicitly require HiggsDNA. HiggsDNA's environment definition constrains Python and NumPy
-to versions compatible with its `coffea<2023` dependency.
+do not implicitly require HiggsDNA. HiggsDNA's environment definition pins Python 3.11 for the
+known working legacy `coffea` stack.
 
 ## Cluster setup
 
@@ -128,8 +128,13 @@ When HiggsDNA already exists, bootstrap:
 
 1. Confirms the destination is a Git checkout with a valid `HEAD`.
 2. Confirms its `origin` matches the configured HiggsDNA URL.
-3. Reports its commit and whether it contains local changes.
-4. Does not fetch, pull, reset, switch branches, or discard changes.
+3. Confirms its branch and commit match the configured branch and exact approved commit.
+4. Reuses it when clean and current.
+5. Fetches and fast-forwards it when clean and behind the configured commit.
+6. Stops on local changes, the wrong branch, or ahead/diverged history.
+
+It never resets, cleans, switches an existing checkout's branch, or discards changes. Read-only
+diagnostics never fetch and report whether the locally visible branch and commit match the pin.
 
 ## Expected output
 
@@ -141,6 +146,13 @@ A new setup prints a clone message followed by a ready message:
 ```
 
 A repeat run prints only the ready message.
+
+A safe fast-forward prints an update followed by a ready message:
+
+```text
+[update] HiggsDNA: <old-commit> -> <pinned-commit> on workflowautomation
+[ready] HiggsDNA: .../HiggsDNA (<pinned-commit>, clean)
+```
 
 ## Troubleshooting
 
@@ -164,6 +176,13 @@ workspace directory.
 
 An older or manually interrupted clone may contain `.git` but no valid commit. Move that directory
 aside, inspect or remove it when safe, and rerun bootstrap.
+
+### Local changes or incompatible branch state
+
+Bootstrap stops without changing the checkout. Inspect `git status`, the current branch, and its
+history. Commit or preserve intentional work yourself. Do not clean or reset solely to satisfy the
+automation. A newer approved repository version is adopted by reviewing and changing the exact
+`commit` pin in `config/repositories.json`.
 
 ## Documentation standard for new workflow stages
 
