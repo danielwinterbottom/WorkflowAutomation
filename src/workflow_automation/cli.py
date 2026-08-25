@@ -35,6 +35,7 @@ class Repository:
     directory: str
     environment_file: str | None = None
     install_extras: str | None = None
+    pip_install_dependencies: bool = True
     import_name: str | None = None
     validation_imports: tuple[str, ...] = ()
 
@@ -239,6 +240,7 @@ def load_repositories(config_path: Path) -> list[Repository]:
                     directory=values.get("directory", name),
                     environment_file=values.get("environment_file"),
                     install_extras=values.get("install_extras"),
+                    pip_install_dependencies=values.get("pip_install_dependencies", True),
                     import_name=values.get("import_name"),
                     validation_imports=tuple(values.get("validation_imports", ())),
                 )
@@ -468,7 +470,11 @@ def prepare_environment(repository: Repository, workspace: Path, environment_roo
     if repository.install_extras:
         install_target += f"[{repository.install_extras}]"
     print(f"[install] {repository.name}: editable {install_target}")
-    run_program([str(python), "-m", "pip", "install", "--editable", install_target], cwd=checkout)
+    install_command = [str(python), "-m", "pip", "install"]
+    if not repository.pip_install_dependencies:
+        install_command.extend(["--no-deps", "--no-build-isolation"])
+    install_command.extend(["--editable", install_target])
+    run_program(install_command, cwd=checkout)
     if not validate_environment(repository, checkout, prefix):
         raise BootstrapError(
             f"environment validation failed: {prefix} cannot import "

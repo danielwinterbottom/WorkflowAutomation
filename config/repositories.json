@@ -7,6 +7,7 @@
       "directory": "HiggsDNA",
       "environment_file": "environment.yml",
       "install_extras": "dev",
+      "pip_install_dependencies": false,
       "import_name": "higgs_dna",
       "validation_imports": ["pkg_resources", "uproot"]
     }

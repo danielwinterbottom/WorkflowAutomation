@@ -85,6 +85,10 @@ Repository configuration may declare additional `validation_imports`. HiggsDNA v
 `pkg_resources` and `uproot` as well as the editable `higgs_dna` import, ensuring the legacy runtime
 is usable rather than merely installed. Its package metadata constrains Setuptools to 70.1.1 because
 Setuptools 82 and later no longer provide the `pkg_resources` API required by this Uproot version.
+HiggsDNA also sets `pip_install_dependencies` to `false`: Conda installs the complete dependency
+set from `environment.yml`, while pip only links the local checkout into that environment. This
+prevents the editable installation from independently upgrading packages such as Setuptools or
+PyTorch.
 
 ## Read-only cluster diagnostics
 

@@ -227,12 +227,13 @@ law run workflow_automation.tasks.RepositoryEnvironment \
   --local-scheduler
 ```
 
-The generic task reads `environment_file`, `install_extras`, and `import_name` from the selected
-repository configuration. For HiggsDNA it prefers Mamba, falls back to Conda, creates the prefix
-from `environment.yml`, installs `.[dev]` editable, and checks that `higgs_dna` resolves to the
-managed checkout. HiggsDNA's environment definition pins Python 3.11 for compatibility with the
-known working legacy `coffea` stack. A valid environment makes the task complete without
-reinstalling.
+The generic task reads `environment_file`, `install_extras`, `pip_install_dependencies`, and
+`import_name` from the selected repository configuration. For HiggsDNA it prefers Mamba, falls
+back to Conda, and creates the complete dependency environment from `environment.yml`. It then
+installs the checkout editable with pip dependency resolution disabled and checks that `higgs_dna`
+resolves to the managed checkout. This separation prevents pip from replacing the versions chosen
+by Conda. HiggsDNA's environment definition pins Python 3.11 for compatibility with the known
+working legacy `coffea` stack. A valid environment makes the task complete without reinstalling.
 
 ### Manual equivalent for HiggsDNA
 
@@ -255,18 +256,37 @@ Or replace `mamba` with `conda`. Then install and validate:
 
 ```bash
 "$HIGGSDNA_ENV/bin/python" -m pip install \
+  --no-deps \
+  --no-build-isolation \
   --editable "$HIGGSDNA_CHECKOUT[dev]"
 "$HIGGSDNA_ENV/bin/python" -c \
   'import higgs_dna; print(higgs_dna.__file__)'
 ```
 
-The printed module path must be inside `workspaces/HiggsDNA`.
+The printed module path must be inside `workspaces/HiggsDNA`. Do not omit `--no-deps`: all
+HiggsDNA dependencies are managed by `environment.yml`, and resolving them again with pip can
+replace that tested environment.
 
 ### Completion check and recovery
 
 Rerun the `law` command; Luigi should report the task complete without executing it. If creation or
 installation fails, the prefix may be incomplete. Preserve the error, inspect the prefix, and move
 it aside manually when safe before retrying. Neither the task nor launcher deletes it.
+
+To perform a genuinely clean rebuild, first confirm the exact generated prefix and then move it
+aside (the automation deliberately never deletes environments):
+
+```bash
+cd /vols/cms/dw515/WorkflowAutomation
+mv workspaces/.environments/HiggsDNA \
+  "workspaces/.environments/HiggsDNA.before-clean-rebuild"
+law run workflow_automation.tasks.RepositoryEnvironment \
+  --repository HiggsDNA \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+The moved environment is retained for recovery until the clean environment has been validated.
 
 ## Adding another repository
 

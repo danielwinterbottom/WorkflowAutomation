@@ -26,6 +26,7 @@ class SetupTests(unittest.TestCase):
             directory="Example",
             environment_file="environment.yml",
             install_extras="dev",
+            pip_install_dependencies=False,
             import_name="example_package",
             validation_imports=("pkg_resources", "uproot"),
         )
@@ -57,6 +58,8 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(len(create_calls), 1)
         self.assertEqual(len(install_calls), 1)
         self.assertEqual(install_calls[0][-1], ".[dev]")
+        self.assertIn("--no-deps", install_calls[0])
+        self.assertIn("--no-build-isolation", install_calls[0])
         validation_commands = [call for call, _ in calls if call[1:2] == ["-c"]]
         self.assertTrue(any(call[-1] == "import pkg_resources" for call in validation_commands))
         self.assertTrue(any(call[-1] == "import uproot" for call in validation_commands))
