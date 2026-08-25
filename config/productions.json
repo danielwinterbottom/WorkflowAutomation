@@ -4,7 +4,8 @@
       "analysis_type": "cp",
       "eras": ["Run3_2022"],
       "channels": ["tt", "et", "mt"],
-      "output": "output/cp_2022_test"
+      "output": "output/cp_2022_test",
+      "effective_output": "output/effective/cp_2022_test"
     }
   }
 }

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from workflow_automation.cli import Repository
 from workflow_automation.tasks import (
     DitauInputPreparation,
+    DitauEffectiveEventPlan,
     DitauProductionPlan,
     DitauSampleManifest,
     GridCredentialCheck,
@@ -101,6 +102,99 @@ class DitauSampleManifestTests(unittest.TestCase):
             receipt = json.loads(Path(task.output().path).read_text())
             self.assertEqual(receipt["input_fingerprint"], "fingerprint")
             self.assertEqual(sorted(receipt["files"]), sorted(task.expected_names()))
+
+
+class DitauEffectiveEventPlanTests(unittest.TestCase):
+    def test_generates_two_non_submitting_tree_commands(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            checkout = root / "HiggsDNA"
+            base_config = checkout / "scripts/ditau/config/ditau_analysis.json"
+            base_config.parent.mkdir(parents=True)
+            base_config.write_text(
+                json.dumps(
+                    {
+                        "samplejson": "old.json",
+                        "year": "old",
+                        "Run_Effective": False,
+                        "EventsNotSelected": False,
+                    }
+                )
+            )
+            repositories = root / "repositories.json"
+            repositories.write_text(
+                json.dumps(
+                    {
+                        "repositories": {
+                            "HiggsDNA": {
+                                "url": "https://example.invalid/HiggsDNA.git",
+                                "revision": "workflowautomation",
+                                "commit": "a" * 40,
+                                "directory": "HiggsDNA",
+                            }
+                        }
+                    }
+                )
+            )
+            productions = root / "productions.json"
+            productions.write_text(
+                json.dumps(
+                    {
+                        "productions": {
+                            "test": {
+                                "analysis_type": "cp",
+                                "eras": ["Run3_2022"],
+                                "channels": ["tt", "et", "mt"],
+                                "effective_output": "output/effective/test",
+                            }
+                        }
+                    }
+                )
+            )
+            task = DitauEffectiveEventPlan(
+                production="test",
+                era="Run3_2022",
+                config=str(repositories),
+                productions_config=str(productions),
+                workspace=str(root),
+            )
+            receipt = task.sample_receipt()
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text('{"receipt": true}\n')
+
+            with patch("workflow_automation.tasks.run_git", return_value="a" * 40):
+                task.run()
+
+            plan = json.loads(Path(task.output().path).read_text())
+            self.assertFalse(plan["submission_enabled"])
+            self.assertEqual(
+                [command["tree"] for command in plan["commands"]],
+                ["Events", "EventsNotSelected"],
+            )
+            self.assertEqual(
+                set(plan["analysis_configs"]), {"Events.json", "EventsNotSelected.json"}
+            )
+            self.assertTrue(all(command["submits_jobs"] for command in plan["commands"]))
+            for command in plan["commands"]:
+                self.assertIn("--submission-manifest-dir", command["argv"])
+                self.assertNotIn("condor_submit", command["argv"])
+                channel_index = command["argv"].index("--channel")
+                self.assertEqual(command["argv"][channel_index + 1], "tt")
+            for tree, expected in (("Events", False), ("EventsNotSelected", True)):
+                analysis = json.loads(
+                    (task.state_dir() / "analysis-configs" / f"{tree}.json").read_text()
+                )
+                self.assertTrue(analysis["Run_Effective"])
+                self.assertEqual(analysis["EventsNotSelected"], expected)
+                self.assertTrue(analysis["samplejson"].endswith("samples_MC.json"))
+
+            with patch.object(
+                DitauInputPreparation, "complete", return_value=True
+            ), patch.object(task, "current_fingerprint", return_value=plan["input_fingerprint"]):
+                self.assertTrue(task.complete())
+                events = task.state_dir() / "analysis-configs/Events.json"
+                events.write_text("{}\n")
+                self.assertFalse(task.complete())
 
 
 class DitauProductionPlanTests(unittest.TestCase):

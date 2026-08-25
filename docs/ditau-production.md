@@ -134,23 +134,69 @@ era, channel, tree, exact job root, jobs directory, and submit files. A failed `
 an error and does not write a record. Status and resubmission tasks will consume these records rather
 than reconstructing paths from the current date.
 
+## Plan effective-event processing
+
+Generate the effective-event plan after input preparation:
+
+```bash
+law run workflow_automation.tasks.DitauEffectiveEventPlan \
+  --production cp_2022_test \
+  --era Run3_2022 \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+This task writes files only; it does not execute HiggsDNA or submit jobs:
+
+```text
+WORKSPACE/.workflow_automation/productions/cp_2022_test/effective-events/Run3_2022/
+├── plan.json
+└── analysis-configs/
+    ├── Events.json
+    └── EventsNotSelected.json
+```
+
+Both configurations use the fingerprinted `samples_MC.json`, set `Run_Effective` to `true`, and
+select exactly one tree. Both planned commands explicitly preserve HiggsDNA's established `tt`
+channel choice for effective-event processing. Separate immutable configurations avoid HiggsDNA's
+manual wrapper behavior of rewriting one JSON file between submissions. The configured output is
+`output/effective/cp_2022_test`.
+
+Inspect the proposed commands without executing them:
+
+```bash
+python -m json.tool \
+  workspaces/.workflow_automation/productions/cp_2022_test/effective-events/Run3_2022/plan.json
+```
+
+The manual equivalent at this stage is to review the two generated analysis JSONs and the `argv`
+arrays in that plan. Do not copy and run those arrays: each invokes `run_analysis.py` with the
+Imperial Condor executor and would submit jobs. Every command is labelled `submits_jobs: true`, while
+the enclosing plan has `submission_enabled: false` and contains no execution path.
+
+The plan is fingerprinted from the production configuration, sample-manifest receipt, base
+HiggsDNA analysis configuration, and HiggsDNA commit. Any change makes it incomplete and causes
+planning—not submission—to run again. It also records and validates the SHA-256 hash of both
+generated analysis configurations.
+
 ## Implemented dependency graph
 
 ```text
-DitauInputPreparation(cp_2022_test)
-├── DitauProductionPlan(cp_2022_test)
-│   └── RepositoryEnvironment(HiggsDNA)
-│       └── RepositoryCheckout(HiggsDNA)
-└── DitauSampleManifest(cp_2022_test, Run3_2022)
-    ├── RepositoryEnvironment(HiggsDNA)
-    │   └── RepositoryCheckout(HiggsDNA)
-    └── GridCredentialCheck
+DitauEffectiveEventPlan(cp_2022_test, Run3_2022)
+└── DitauInputPreparation(cp_2022_test)
+    ├── DitauProductionPlan(cp_2022_test)
+    │   └── RepositoryEnvironment(HiggsDNA)
+    │       └── RepositoryCheckout(HiggsDNA)
+    └── DitauSampleManifest(cp_2022_test, Run3_2022)
+        ├── RepositoryEnvironment(HiggsDNA)
+        │   └── RepositoryCheckout(HiggsDNA)
+        └── GridCredentialCheck
 ```
 
 `GridCredentialCheck` is read-only. It requires `voms-proxy-info --exists --valid 5:00` to succeed
 and otherwise stops with manual proxy instructions.
 
-The next planned chain after `DitauSampleManifest` is:
+The next planned chain after `DitauEffectiveEventPlan` is:
 
 ```text
 EffectiveEventSubmission
@@ -162,8 +208,8 @@ EffectiveEventSubmission
                     └── ROOTMerge(channel)
 ```
 
-None of these tasks is implemented yet. In particular, effective-event submission remains outside
-the enabled workflow.
+None of these tasks is implemented yet. The plan describes effective-event submissions, but no task
+can execute them.
 
 Job checking and resubmission will be distinct tasks. A status check must remain read-only;
 resubmission will require an explicit operator opt-in.

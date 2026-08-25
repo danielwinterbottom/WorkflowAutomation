@@ -436,3 +436,186 @@ class DitauInputPreparation(law.WrapperTask):
                 DitauSampleManifest(era=era, **common) for era in production["eras"]
             ],
         }
+
+
+class DitauEffectiveEventPlan(law.Task):
+    """Plan, but never execute, the two effective-event batch submissions."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauInputPreparation:
+        return DitauInputPreparation(
+            production=self.production,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def production_config(self) -> dict[str, object]:
+        data = json.loads(Path(self.productions_config).read_text())
+        try:
+            production = data["productions"][str(self.production)]
+        except KeyError as exc:
+            raise BootstrapError(f"unknown production {self.production!r}") from exc
+        if str(self.era) not in production["eras"]:
+            raise BootstrapError(
+                f"era {self.era!r} is not configured for production {self.production!r}"
+            )
+        if not production.get("effective_output"):
+            raise BootstrapError(
+                f"production {self.production!r} has no effective_output configured"
+            )
+        return production
+
+    def state_dir(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+            / "effective-events"
+            / str(self.era)
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.state_dir() / "plan.json"))
+
+    def checkout(self) -> tuple[Repository, Path]:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        repository = repositories["HiggsDNA"]
+        checkout = Path(self.workspace).expanduser().resolve() / repository.directory
+        return repository, checkout
+
+    def sample_receipt(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+            / "sample-manifests"
+            / str(self.era)
+            / "manifest.json"
+        )
+
+    def current_fingerprint(self) -> str:
+        production = self.production_config()
+        _, checkout = self.checkout()
+        digest = hashlib.sha256(Path(self.productions_config).read_bytes())
+        digest.update(
+            json.dumps(
+                {
+                    "era": str(self.era),
+                    "effective_output": production["effective_output"],
+                },
+                sort_keys=True,
+            ).encode()
+        )
+        digest.update(run_git(["rev-parse", "HEAD"], cwd=checkout).encode())
+        digest.update((checkout / "scripts/ditau/config/ditau_analysis.json").read_bytes())
+        digest.update(self.sample_receipt().read_bytes())
+        return digest.hexdigest()
+
+    def complete(self) -> bool:
+        if not self.requires().complete() or not self.output().exists():
+            return False
+        try:
+            plan = json.loads(Path(self.output().path).read_text())
+            if plan["input_fingerprint"] != self.current_fingerprint():
+                return False
+            expected = {"Events.json", "EventsNotSelected.json"}
+            if set(plan["analysis_configs"]) != expected:
+                return False
+            config_dir = self.state_dir() / "analysis-configs"
+            return all(
+                (config_dir / name).is_file()
+                and sha256_file(config_dir / name) == plan["analysis_configs"][name]
+                for name in expected
+            )
+        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        production = self.production_config()
+        repository, checkout = self.checkout()
+        environment_base = (
+            Path(self.environment_root).expanduser().resolve()
+            if self.environment_root
+            else Path(self.workspace).expanduser().resolve() / ".environments"
+        )
+        python = environment_base / repository.directory / "bin/python"
+        run_analysis = checkout / "scripts/ditau/processing/run_analysis.py"
+        sample_json = self.sample_receipt().parent / "samples" / "samples_MC.json"
+        generated = self.state_dir() / "analysis-configs"
+        manifests = self.state_dir() / "submission-records"
+        generated.mkdir(parents=True, exist_ok=True)
+        base = json.loads(
+            (checkout / "scripts/ditau/config/ditau_analysis.json").read_text()
+        )
+
+        commands = []
+        analysis_configs = {}
+        for tree, events_not_selected in (("Events", False), ("EventsNotSelected", True)):
+            analysis = dict(base)
+            analysis.update(
+                {
+                    "samplejson": str(sample_json),
+                    "year": str(self.era),
+                    "Run_Effective": True,
+                    "EventsNotSelected": events_not_selected,
+                }
+            )
+            analysis_path = generated / f"{tree}.json"
+            analysis_path.write_text(
+                json.dumps(analysis, indent=2, sort_keys=True) + "\n"
+            )
+            analysis_configs[analysis_path.name] = sha256_file(analysis_path)
+            commands.append(
+                {
+                    "stage": "effective-event-submission",
+                    "era": str(self.era),
+                    "tree": tree,
+                    "submits_jobs": True,
+                    "cwd": str(checkout),
+                    "argv": [
+                        str(python),
+                        str(run_analysis),
+                        "--json-analysis",
+                        str(analysis_path),
+                        "--dump",
+                        str(production["effective_output"]),
+                        "--executor",
+                        "imperial_condor",
+                        "--channel",
+                        "tt",
+                        "--voms",
+                        str(Path.home() / "cms.proxy"),
+                        "--chunk",
+                        "150000",
+                        "--debug",
+                        "--submission-manifest-dir",
+                        str(manifests),
+                    ],
+                }
+            )
+
+        plan = {
+            "schema_version": 1,
+            "production": str(self.production),
+            "era": str(self.era),
+            "effective_output": production["effective_output"],
+            "sample_manifest_receipt": str(self.sample_receipt()),
+            "higgsdna_commit": run_git(["rev-parse", "HEAD"], cwd=checkout),
+            "input_fingerprint": self.current_fingerprint(),
+            "analysis_configs": analysis_configs,
+            "submission_enabled": False,
+            "commands": commands,
+        }
+        self.output().dump(
+            json.dumps(plan, indent=2, sort_keys=True) + "\n", formatter="text"
+        )

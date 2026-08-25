@@ -317,6 +317,21 @@ Create the CMS proxy manually first, as documented in `ditau-production.md`. Thi
 dCache with `gfal-ls` and writes fingerprinted sample JSONs under the workflow state directory; it
 does not modify HiggsDNA. It does not run analysis processing, query HTCondor, or submit jobs.
 
+Plan the next effective-event stage without executing its commands:
+
+```bash
+law run workflow_automation.tasks.DitauEffectiveEventPlan \
+  --production cp_2022_test \
+  --era Run3_2022 \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+This produces separate `Events.json` and `EventsNotSelected.json` configurations plus an inspectable
+`effective-events/Run3_2022/plan.json`. Its command arrays would submit through Imperial Condor if
+manually executed, so the plan labels them `submits_jobs: true`; WorkflowAutomation keeps
+`submission_enabled` false and never invokes them.
+
 ## Documentation requirements for future steps
 
 Each new stage must be added here in the same change, including its purpose, prerequisites,
