@@ -283,7 +283,7 @@ law run workflow_automation.tasks.RepositoryEnvironment \
 A downstream task should require only the `RepositoryEnvironment` instances it actually uses.
 Unrelated repositories remain untouched.
 
-## Current boundary: no processing or submission
+## Current boundary: input discovery, but no processing or submission
 
 The initial CP production is configured in `config/productions.json` for `Run3_2022` only. Generate
 an inspectable plan with:
@@ -302,8 +302,20 @@ to the production's `eras` list after the 2022 test is validated.
 
 This task depends on `RepositoryEnvironment(HiggsDNA)`, which itself depends on the checkout task.
 The one production command therefore clones HiggsDNA and creates its environment when needed, while
-reusing valid existing setup. The implemented graph then ends after writing the production plan: no
-HiggsDNA processing, remote-data operation, scheduler query, or job submission task is enabled yet.
+reusing valid existing setup.
+
+The next implemented wrapper adds credential validation and dCache sample discovery:
+
+```bash
+law run workflow_automation.tasks.DitauInputPreparation \
+  --production cp_2022_test \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+Create the CMS proxy manually first, as documented in `ditau-production.md`. This task queries
+dCache with `gfal-ls` and writes fingerprinted sample JSONs under the workflow state directory; it
+does not modify HiggsDNA. It does not run analysis processing, query HTCondor, or submit jobs.
 
 ## Documentation requirements for future steps
 

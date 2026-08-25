@@ -1,8 +1,8 @@
 # Ditau production automation
 
 This page records the developing `law` graph for the HiggsDNA ditau production. The initial test
-scope is deliberately limited to CP samples and `Run3_2022`. No task currently executes the planned
-commands or submits jobs.
+scope is deliberately limited to CP samples and `Run3_2022`. Sample discovery can access dCache,
+but no task currently executes an analysis command or submits jobs.
 
 ## Initial production configuration
 
@@ -60,23 +60,64 @@ WORKSPACE/.workflow_automation/productions/cp_2022_test/
     └── Run3_2022__mt.json
 ```
 
-The source HiggsDNA analysis JSON files are not modified. `plan.json` contains argument arrays,
-not shell strings, and labels submission commands with `submits_jobs: true`. It also contains the
-HiggsDNA commit and an input fingerprint. The planning task never executes these commands and sets
-`submission_enabled` to `false`.
+The source HiggsDNA analysis JSON files are not modified. Generated configurations point to the
+workflow-owned sample manifests described below, rather than HiggsDNA's checked-in sample JSONs.
+`plan.json` contains argument arrays, not shell strings, and labels submission commands with
+`submits_jobs: true`. It also contains the HiggsDNA commit and an input fingerprint. The planning
+task never executes these commands and sets `submission_enabled` to `false`.
 
-## Sample discovery
+## Prepare production inputs
 
-HiggsDNA sample discovery is now non-interactive and defaults to CP:
+Inspect the implemented chain without running it:
 
 ```bash
-python scripts/ditau/pre_processing/fetch_samples.py \
-  --year Run3_2022 \
-  --analysis-type cp
+law run workflow_automation.tasks.DitauInputPreparation \
+  --production cp_2022_test \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --print-deps -1
 ```
 
-The alternatives `mssm` and `all` remain available. This command accesses dCache and writes channel
-sample JSON files, so it is not part of the read-only planning task yet.
+After manually creating and exporting the proxy, run the input stage:
+
+```bash
+law run workflow_automation.tasks.DitauInputPreparation \
+  --production cp_2022_test \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+This executes sample discovery against dCache but does not submit jobs. It writes outside the
+HiggsDNA Git checkout:
+
+```text
+WORKSPACE/.workflow_automation/productions/cp_2022_test/sample-manifests/Run3_2022/
+├── manifest.json
+└── samples/
+    ├── samples_MC.json
+    ├── samples_tt.json
+    ├── samples_et.json
+    └── samples_mt.json
+```
+
+`manifest.json` records the analysis type, HiggsDNA commit, input fingerprint, generation time, and
+SHA-256 hash of every output. Completion requires all expected files and matching hashes. Changes to
+the production channels, analysis type, era sample definition, discovery script, or HiggsDNA commit
+make the task stale. Strict discovery fails without writing new manifests when `gfal-ls` fails or a
+configured sample directory contains no ROOT files.
+
+Manual equivalent, run from the HiggsDNA checkout with its environment Python:
+
+```bash
+../.environments/HiggsDNA/bin/python \
+  scripts/ditau/pre_processing/fetch_samples.py \
+  --year Run3_2022 \
+  --analysis-type cp \
+  --output-dir ../.workflow_automation/productions/cp_2022_test/sample-manifests/Run3_2022/samples \
+  --strict
+```
+
+The alternatives `mssm` and `all` remain available in HiggsDNA, while this production is configured
+for CP. WorkflowAutomation never creates or renews the proxy.
 
 ## Exact submission-directory records
 
@@ -93,24 +134,36 @@ era, channel, tree, exact job root, jobs directory, and submit files. A failed `
 an error and does not write a record. Status and resubmission tasks will consume these records rather
 than reconstructing paths from the current date.
 
-## Planned dependency graph
+## Implemented dependency graph
 
 ```text
-RepositoryCheckout(HiggsDNA)
-└── RepositoryEnvironment(HiggsDNA)
-    └── DitauProductionPlan(cp_2022_test) [implemented]
-        └── GridCredentialCheck
-            └── SampleManifest(Run3_2022, cp)
-                └── EffectiveEventSubmission(Run3_2022)
-                    └── EffectiveEventCollection(Run3_2022)
-                        └── StitchingConfiguration(Run3_2022)
-                            └── ParameterConfiguration(Run3_2022)
-                                └── StandardAnalysis(Run3_2022, channel)
-                                    └── ROOTConversion(Run3_2022, channel)
-                                        └── ROOTMerge(Run3_2022, channel)
+DitauInputPreparation(cp_2022_test)
+├── DitauProductionPlan(cp_2022_test)
+│   └── RepositoryEnvironment(HiggsDNA)
+│       └── RepositoryCheckout(HiggsDNA)
+└── DitauSampleManifest(cp_2022_test, Run3_2022)
+    ├── RepositoryEnvironment(HiggsDNA)
+    │   └── RepositoryCheckout(HiggsDNA)
+    └── GridCredentialCheck
 ```
 
-The tasks below `DitauProductionPlan` in this diagram are planned, not yet implemented.
+`GridCredentialCheck` is read-only. It requires `voms-proxy-info --exists --valid 5:00` to succeed
+and otherwise stops with manual proxy instructions.
+
+The next planned chain after `DitauSampleManifest` is:
+
+```text
+EffectiveEventSubmission
+└── EffectiveEventCollection
+    └── StitchingConfiguration
+        └── ParameterConfiguration
+            └── StandardAnalysis(channel)
+                └── ROOTConversion(channel)
+                    └── ROOTMerge(channel)
+```
+
+None of these tasks is implemented yet. In particular, effective-event submission remains outside
+the enabled workflow.
 
 Job checking and resubmission will be distinct tasks. A status check must remain read-only;
 resubmission will require an explicit operator opt-in.
