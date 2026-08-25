@@ -290,8 +290,10 @@ The plan and generated per-era/channel analysis configurations are written below
 submit jobs, but does not execute them (`submission_enabled` is `false`). Additional eras are added
 to the production's `eras` list after the 2022 test is validated.
 
-The implemented execution graph still ends at repository environment preparation. No HiggsDNA
-processing, remote-data operation, scheduler query, or job submission task is enabled yet.
+This task depends on `RepositoryEnvironment(HiggsDNA)`, which itself depends on the checkout task.
+The one production command therefore clones HiggsDNA and creates its environment when needed, while
+reusing valid existing setup. The implemented graph then ends after writing the production plan: no
+HiggsDNA processing, remote-data operation, scheduler query, or job submission task is enabled yet.
 
 ## Documentation requirements for future steps
 

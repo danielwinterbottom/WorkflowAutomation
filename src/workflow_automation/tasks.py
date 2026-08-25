@@ -104,8 +104,8 @@ class DitauProductionPlan(law.Task):
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
     environment_root = luigi.OptionalParameter(default=None, significant=False)
 
-    def requires(self) -> RepositoryCheckout:
-        return RepositoryCheckout(
+    def requires(self) -> RepositoryEnvironment:
+        return RepositoryEnvironment(
             repository="HiggsDNA",
             config=self.config,
             workspace=self.workspace,
@@ -145,6 +145,8 @@ class DitauProductionPlan(law.Task):
         return digest.hexdigest()
 
     def complete(self) -> bool:
+        if not self.requires().complete():
+            return False
         if not self.output().exists():
             return False
         try:

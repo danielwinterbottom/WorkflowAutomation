@@ -44,6 +44,11 @@ law run workflow_automation.tasks.DitauProductionPlan \
   --local-scheduler
 ```
 
+This single command first ensures that the configured HiggsDNA revision is checked out and its
+isolated Python environment is installed and valid. `law` skips either prerequisite when it is
+already complete. It can therefore clone HiggsDNA or create its environment, but it does not access
+physics input data or submit analysis jobs.
+
 This writes:
 
 ```text
@@ -91,16 +96,21 @@ than reconstructing paths from the current date.
 ## Planned dependency graph
 
 ```text
-GridCredentialCheck
-└── SampleManifest(Run3_2022, cp)
-    └── EffectiveEventSubmission(Run3_2022)
-        └── EffectiveEventCollection(Run3_2022)
-            └── StitchingConfiguration(Run3_2022)
-                └── ParameterConfiguration(Run3_2022)
-                    └── StandardAnalysis(Run3_2022, channel)
-                        └── ROOTConversion(Run3_2022, channel)
-                            └── ROOTMerge(Run3_2022, channel)
+RepositoryCheckout(HiggsDNA)
+└── RepositoryEnvironment(HiggsDNA)
+    └── DitauProductionPlan(cp_2022_test) [implemented]
+        └── GridCredentialCheck
+            └── SampleManifest(Run3_2022, cp)
+                └── EffectiveEventSubmission(Run3_2022)
+                    └── EffectiveEventCollection(Run3_2022)
+                        └── StitchingConfiguration(Run3_2022)
+                            └── ParameterConfiguration(Run3_2022)
+                                └── StandardAnalysis(Run3_2022, channel)
+                                    └── ROOTConversion(Run3_2022, channel)
+                                        └── ROOTMerge(Run3_2022, channel)
 ```
+
+The tasks below `DitauProductionPlan` in this diagram are planned, not yet implemented.
 
 Job checking and resubmission will be distinct tasks. A status check must remain read-only;
 resubmission will require an explicit operator opt-in.
