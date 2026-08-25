@@ -79,6 +79,10 @@ For each automated step alongside its manual equivalent, see
 [`docs/workflow-steps.md`](docs/workflow-steps.md). For operating policy, expected behavior, and
 troubleshooting, see [`docs/operator-guide.md`](docs/operator-guide.md).
 
+The developing CP ditau production graph, its single-era test scope, credential boundary, and exact
+submission-directory records are documented in
+[`docs/ditau-production.md`](docs/ditau-production.md).
+
 ## Tests
 
 ```bash

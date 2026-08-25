@@ -1,0 +1,11 @@
+{
+  "productions": {
+    "cp_2022_test": {
+      "analysis_type": "cp",
+      "eras": ["Run3_2022"],
+      "analysis_channels": ["tt", "et", "mt"],
+      "root_channels": ["et", "mt"],
+      "output": "output/cp_2022_test"
+    }
+  }
+}

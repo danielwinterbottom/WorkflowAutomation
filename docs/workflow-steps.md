@@ -275,8 +275,23 @@ Unrelated repositories remain untouched.
 
 ## Current boundary: no processing or submission
 
-The implemented `law` graph ends at repository environment preparation. No HiggsDNA processing,
-remote-data operation, scheduler query, or job submission task exists yet.
+The initial CP production is configured in `config/productions.json` for `Run3_2022` only. Generate
+an inspectable plan with:
+
+```bash
+law run workflow_automation.tasks.DitauProductionPlan \
+  --production cp_2022_test \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --local-scheduler
+```
+
+The plan and generated per-era/channel analysis configurations are written below
+`WORKSPACE/.workflow_automation/productions/cp_2022_test/`. The plan labels commands that would
+submit jobs, but does not execute them (`submission_enabled` is `false`). Additional eras are added
+to the production's `eras` list after the 2022 test is validated.
+
+The implemented execution graph still ends at repository environment preparation. No HiggsDNA
+processing, remote-data operation, scheduler query, or job submission task is enabled yet.
 
 ## Documentation requirements for future steps
 
