@@ -139,7 +139,7 @@ class DitauProductionPlan(law.Task):
         )
         digest = hashlib.sha256(Path(self.productions_config).read_bytes())
         digest.update(run_git(["rev-parse", "HEAD"], cwd=checkout).encode())
-        for channel in production["analysis_channels"]:
+        for channel in production["channels"]:
             source = checkout / f"scripts/ditau/config/ditau_analysis_{channel}.json"
             digest.update(source.read_bytes())
         return digest.hexdigest()
@@ -172,7 +172,7 @@ class DitauProductionPlan(law.Task):
 
         commands = []
         for era in production["eras"]:
-            for channel in production["analysis_channels"]:
+            for channel in production["channels"]:
                 source = checkout / f"scripts/ditau/config/ditau_analysis_{channel}.json"
                 analysis = json.loads(source.read_text())
                 analysis.update(
@@ -217,8 +217,7 @@ class DitauProductionPlan(law.Task):
             "production": self.production,
             "analysis_type": production["analysis_type"],
             "eras": production["eras"],
-            "analysis_channels": production["analysis_channels"],
-            "root_channels": production["root_channels"],
+            "channels": production["channels"],
             "output": production["output"],
             "higgsdna_commit": run_git(["rev-parse", "HEAD"], cwd=checkout),
             "input_fingerprint": self.current_fingerprint(),

@@ -11,8 +11,7 @@ commands or submits jobs.
 - Production: `cp_2022_test`
 - Analysis type: CP
 - Era: `Run3_2022`
-- Analysis channels: `tt`, `et`, `mt`
-- ROOT conversion and merge channels: `et`, `mt`
+- Channels for analysis, ROOT conversion, and merging: `tt`, `et`, `mt`
 - Output: `output/cp_2022_test`
 
 Additional eras will be appended to the `eras` list only after the 2022 workflow is validated.
