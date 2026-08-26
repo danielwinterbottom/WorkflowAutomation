@@ -177,6 +177,23 @@ class DitauSampleManifest(law.Task):
         channels = self.production_config()["channels"]
         return ["samples_MC.json", *(f"samples_{channel}.json" for channel in channels)]
 
+    @staticmethod
+    def validate_sample_file(path: Path) -> None:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or not data:
+            raise BootstrapError(f"sample manifest must be a non-empty JSON object: {path}")
+        for sample, files in data.items():
+            if not isinstance(sample, str) or not sample:
+                raise BootstrapError(f"sample manifest has an invalid dataset name: {path}")
+            if not isinstance(files, list) or not files:
+                raise BootstrapError(
+                    f"sample {sample!r} must contain a non-empty list of files: {path}"
+                )
+            if any(not isinstance(item, str) or not item for item in files):
+                raise BootstrapError(
+                    f"sample {sample!r} contains a non-string or empty file path: {path}"
+                )
+
     def checkout(self) -> tuple[Repository, Path]:
         repositories = {item.name: item for item in load_repositories(Path(self.config))}
         repository = repositories["HiggsDNA"]
@@ -218,11 +235,12 @@ class DitauSampleManifest(law.Task):
             expected = self.expected_names()
             if sorted(receipt["files"]) != sorted(expected):
                 return False
-            return all(
-                (self.sample_dir() / name).is_file()
-                and sha256_file(self.sample_dir() / name) == receipt["files"][name]
-                for name in expected
-            )
+            for name in expected:
+                path = self.sample_dir() / name
+                if not path.is_file() or sha256_file(path) != receipt["files"][name]:
+                    return False
+                self.validate_sample_file(path)
+            return True
         except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
             return False
 
@@ -254,9 +272,7 @@ class DitauSampleManifest(law.Task):
         hashes = {}
         for name in self.expected_names():
             path = self.sample_dir() / name
-            data = json.loads(path.read_text())
-            if not isinstance(data, dict):
-                raise BootstrapError(f"sample manifest is not a JSON object: {path}")
+            self.validate_sample_file(path)
             hashes[name] = sha256_file(path)
         receipt = {
             "schema_version": 1,

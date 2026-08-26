@@ -112,6 +112,11 @@ the production channels, analysis type, era sample definition, discovery script,
 make the task stale. Strict discovery fails without writing new manifests when `gfal-ls` fails or a
 configured sample directory contains no ROOT files.
 
+WorkflowAutomation also validates the generated JSON structure before accepting the receipt. Each
+manifest must be a non-empty object, and every dataset must map to a non-empty list of non-empty
+file-path strings. A value such as JSON `null` therefore stops during input preparation rather than
+reaching an analysis or submission task.
+
 Manual equivalent, run from the HiggsDNA checkout with its environment Python:
 
 ```bash

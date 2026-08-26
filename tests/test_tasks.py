@@ -86,7 +86,9 @@ class DitauSampleManifestTests(unittest.TestCase):
                 output_dir = Path(arguments[arguments.index("--output-dir") + 1])
                 output_dir.mkdir(parents=True, exist_ok=True)
                 for name in task.expected_names():
-                    (output_dir / name).write_text("{}\n")
+                    (output_dir / name).write_text(
+                        '{"sample": ["root://example.invalid/nano.root"]}\n'
+                    )
                 return ""
 
             with patch.object(task, "checkout", return_value=(repository, checkout)), patch.object(
@@ -105,6 +107,14 @@ class DitauSampleManifestTests(unittest.TestCase):
             receipt = json.loads(Path(task.output().path).read_text())
             self.assertEqual(receipt["input_fingerprint"], "fingerprint")
             self.assertEqual(sorted(receipt["files"]), sorted(task.expected_names()))
+
+    def test_rejects_null_sample_file_list(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "samples_MC.json"
+            path.write_text('{"broken-sample": null}\n')
+
+            with self.assertRaisesRegex(BootstrapError, "non-empty list of files"):
+                DitauSampleManifest.validate_sample_file(path)
 
 
 class DitauEffectiveEventPlanTests(unittest.TestCase):
