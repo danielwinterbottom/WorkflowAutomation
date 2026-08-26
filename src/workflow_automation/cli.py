@@ -391,10 +391,14 @@ def environment_python(prefix: Path) -> Path:
     return prefix / ("python.exe" if os.name == "nt" else "bin/python")
 
 
-def validate_environment(repository: Repository, checkout: Path, prefix: Path) -> bool:
+def environment_validation_error(
+    repository: Repository, checkout: Path, prefix: Path
+) -> str | None:
     python = environment_python(prefix)
-    if not python.is_file() or not repository.import_name:
-        return False
+    if not python.is_file():
+        return f"environment Python is missing: {python}"
+    if not repository.import_name:
+        return "repository import_name is not configured"
     try:
         module_path = run_program(
             [
@@ -403,18 +407,22 @@ def validate_environment(repository: Repository, checkout: Path, prefix: Path) -
                 f"import {repository.import_name}; print({repository.import_name}.__file__)",
             ]
         )
-    except BootstrapError:
-        return False
+    except BootstrapError as exc:
+        return f"cannot import {repository.import_name}: {exc}"
     try:
         Path(module_path).resolve().relative_to(checkout.resolve())
     except (OSError, ValueError):
-        return False
+        return f"{repository.import_name} resolves outside the managed checkout: {module_path}"
     for import_name in repository.validation_imports:
         try:
             run_program([str(python), "-c", f"import {import_name}"])
-        except BootstrapError:
-            return False
-    return True
+        except BootstrapError as exc:
+            return f"cannot import validation module {import_name}: {exc}"
+    return None
+
+
+def validate_environment(repository: Repository, checkout: Path, prefix: Path) -> bool:
+    return environment_validation_error(repository, checkout, prefix) is None
 
 
 def prepare_environment(repository: Repository, workspace: Path, environment_root: Path) -> None:
@@ -475,10 +483,10 @@ def prepare_environment(repository: Repository, workspace: Path, environment_roo
         install_command.extend(["--no-deps", "--no-build-isolation"])
     install_command.extend(["--editable", install_target])
     run_program(install_command, cwd=checkout)
-    if not validate_environment(repository, checkout, prefix):
+    validation_error = environment_validation_error(repository, checkout, prefix)
+    if validation_error:
         raise BootstrapError(
-            f"environment validation failed: {prefix} cannot import "
-            f"{repository.import_name} after installation"
+            f"environment validation failed for {prefix}: {validation_error}"
         )
     print(f"[ready] {repository.name} environment: {prefix}")
 

@@ -88,7 +88,9 @@ Setuptools 82 and later no longer provide the `pkg_resources` API required by th
 HiggsDNA also sets `pip_install_dependencies` to `false`: Conda installs the complete dependency
 set from `environment.yml`, while pip only links the local checkout into that environment. This
 prevents the editable installation from independently upgrading packages such as Setuptools or
-PyTorch.
+PyTorch. The Setuptools constraint is present in both the Conda dependency list and the nested
+`pip:` list because `conda env create` invokes pip as a separate resolver for that section; both
+resolvers must retain the legacy-compatible version.
 
 ## Read-only cluster diagnostics
 

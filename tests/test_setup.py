@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow_automation.cli import BootstrapError, Repository, prepare_environment
+from workflow_automation.cli import (
+    BootstrapError,
+    Repository,
+    environment_validation_error,
+    prepare_environment,
+)
 
 
 class SetupTests(unittest.TestCase):
@@ -74,6 +79,23 @@ class SetupTests(unittest.TestCase):
         with patch("workflow_automation.cli.shutil.which", return_value=None):
             with self.assertRaisesRegex(BootstrapError, "mamba or conda"):
                 prepare_environment(self.repository, self.workspace, self.environment_root)
+
+    def test_validation_names_the_failed_import(self) -> None:
+        python = self.prefix / "bin/python"
+        python.parent.mkdir(parents=True)
+        python.write_text("")
+
+        def fake_run(arguments: list[str], cwd: Path | None = None) -> str:
+            if arguments[-1] == "import pkg_resources":
+                raise BootstrapError("pkg_resources is missing")
+            if arguments[1:2] == ["-c"]:
+                return str(self.checkout / "example_package/__init__.py")
+            return ""
+
+        with patch("workflow_automation.cli.run_program", side_effect=fake_run):
+            error = environment_validation_error(self.repository, self.checkout, self.prefix)
+
+        self.assertIn("validation module pkg_resources", error or "")
 
 
 if __name__ == "__main__":

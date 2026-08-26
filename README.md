@@ -79,6 +79,9 @@ For each automated step alongside its manual equivalent, see
 [`docs/workflow-steps.md`](docs/workflow-steps.md). For operating policy, expected behavior, and
 troubleshooting, see [`docs/operator-guide.md`](docs/operator-guide.md).
 
+The intended HiggsDNA, TIDAL, MUFFIN, and statistical-inference stages are described in the
+[`project roadmap`](docs/project-roadmap.md), including the optional systematics branches.
+
 The developing CP ditau production graph, its single-era test scope, credential boundary,
 fingerprinted dCache sample discovery, and exact submission-directory records are documented in
 [`docs/ditau-production.md`](docs/ditau-production.md).
