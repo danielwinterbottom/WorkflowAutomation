@@ -766,6 +766,13 @@ class DitauEffectiveEventSubmission(law.Task):
     def intent_path(self) -> Path:
         return self.requires().requires().state_dir() / "submission-intents" / f"{self.tree}.json"
 
+    def command_output_path(self) -> Path:
+        return (
+            self.requires().requires().state_dir()
+            / "submission-intents"
+            / f"{self.tree}.command-output.log"
+        )
+
     def plan(self) -> dict[str, object]:
         return self.requires().plan()
 
@@ -839,13 +846,17 @@ class DitauEffectiveEventSubmission(law.Task):
             before = {
                 path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
             }
-            run_program(command["argv"], cwd=Path(command["cwd"]))
+            output = run_program(command["argv"], cwd=Path(command["cwd"]))
             after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
             changed = [path for path in after if before.get(path) != sha256_file(path)]
             if len(changed) != 1:
+                transcript = self.command_output_path()
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                transcript.write_text(output + "\n")
                 raise BootstrapError(
                     f"submission command returned but found {len(changed)} new or changed records; "
-                    f"intent retained at {intent} for manual reconciliation"
+                    f"the command exited successfully, so its captured output was written to "
+                    f"{transcript}; intent retained at {intent} for manual reconciliation"
                 )
         except Exception as exc:
             failed_intent = json.loads(intent.read_text())
@@ -857,6 +868,8 @@ class DitauEffectiveEventSubmission(law.Task):
                     "error": str(exc),
                 }
             )
+            if self.command_output_path().is_file():
+                failed_intent["command_output"] = str(self.command_output_path())
             temporary.write_text(
                 json.dumps(failed_intent, indent=2, sort_keys=True) + "\n"
             )

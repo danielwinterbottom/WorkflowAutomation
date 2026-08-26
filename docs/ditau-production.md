@@ -228,7 +228,48 @@ required for diagnosis. There is no automatic resubmission.
 
 Readiness also starts the HiggsDNA analysis entry point with `--help`. This imports its runtime
 dependencies without processing data or reaching Condor, catching failures such as missing
-`pkg_resources` before an intent is created.
+`pkg_resources` before an intent is created. It does **not** validate the generated analysis
+configuration, so a configuration that HiggsDNA rejects still reaches submission.
+
+### Commands that fail while reporting success
+
+HiggsDNA can reject a configuration and stop without submitting anything, yet still exit with
+status zero. `check_corr_syst` in `higgs_dna/systematics/ditau/__init__.py` does exactly this: it
+calls a bare `exit()`, which is `exit(None)` and therefore exit code 0. To a caller this is
+indistinguishable from a successful run.
+
+The record check is what catches this. A command that exits successfully but creates or changes no
+submission record is treated as a failure, and its captured standard output is written to
+
+```text
+effective-events/<era>/submission-intents/<tree>.command-output.log
+```
+
+The failed intent references that file in its `command_output` field. Always read the transcript
+first: for this class of failure it holds the only explanation, because the command itself reported
+success.
+
+### Reconciling an unresolved intent
+
+Before archiving an intent, confirm that no jobs were actually submitted. Note that
+
+```bash
+condor_q "$USER"
+```
+
+being non-empty does **not** by itself mean this production submitted anything, because unrelated
+work runs under the same account on the same schedd. Filter on the job's working directory and
+executable instead:
+
+```bash
+condor_q "$USER" -af ClusterId Iwd Cmd | grep -iE 'higgsdna|workflowautomation|effective'
+```
+
+Treat the intent as unresolved until all of these agree: no matching Condor jobs, no
+`submission-records` entry, no `submission-receipts` entry, and no HiggsDNA job directory under
+`.higgs_dna_jobs/` in the checkout. Archive reconciled intents under
+`effective-events/<era>/reconciled-intents/<label>/` together with a note recording the evidence
+checked. Never delete them.
 
 ## Implemented dependency graph
 

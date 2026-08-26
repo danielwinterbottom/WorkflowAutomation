@@ -298,6 +298,47 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
             self.assertIn("diagnostic submission failure", intent["error"])
             self.assertIn("failed_at", intent)
 
+    def test_captures_command_output_when_submission_records_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = {
+                "tree": "Events",
+                "submits_jobs": True,
+                "cwd": str(root),
+                "argv": [
+                    "/fake/python",
+                    "/fake/run_analysis.py",
+                    "--submission-manifest-dir",
+                    str(root / "submission-records"),
+                ],
+            }
+            plan = {"input_fingerprint": "plan-fingerprint", "commands": [command]}
+            task = DitauEffectiveEventSubmission(
+                production="test",
+                era="Run3_2022",
+                tree="Events",
+                allow_submission=True,
+                workspace=str(root),
+            )
+
+            # A command that exits successfully but submits nothing must leave a
+            # durable transcript, otherwise the failure cannot be diagnosed later.
+            with patch.object(task, "plan", return_value=plan), patch.object(
+                DitauEffectiveEventReadiness, "complete", return_value=True
+            ), patch(
+                "workflow_automation.tasks.run_program",
+                return_value="Requested to evaluate systematic variation without correction",
+            ):
+                with self.assertRaisesRegex(BootstrapError, "0 new or changed records"):
+                    task.run()
+
+            transcript = task.command_output_path()
+            self.assertTrue(transcript.is_file())
+            self.assertIn("systematic variation", transcript.read_text())
+            intent = json.loads(task.intent_path().read_text())
+            self.assertEqual(intent["status"], "failed")
+            self.assertEqual(intent["command_output"], str(transcript))
+
 
 class DitauProductionPlanTests(unittest.TestCase):
     def test_requires_higgsdna_environment(self):

@@ -86,6 +86,11 @@ The developing CP ditau production graph, its single-era test scope, credential 
 fingerprinted dCache sample discovery, and exact submission-directory records are documented in
 [`docs/ditau-production.md`](docs/ditau-production.md).
 
+Documentation for this workflow is spread across several repositories.
+[`docs/documentation-map.md`](docs/documentation-map.md) is the running inventory of what exists,
+where it lives, and which steps are undocumented. Keep it current when documentation changes in any
+repository.
+
 ## Tests
 
 ```bash
