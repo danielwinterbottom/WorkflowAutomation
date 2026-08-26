@@ -816,20 +816,36 @@ class DitauEffectiveEventSubmission(law.Task):
         )
         os.replace(temporary, intent)
 
-        manifest_dir_index = command["argv"].index("--submission-manifest-dir") + 1
-        manifest_dir = Path(command["argv"][manifest_dir_index])
-        pattern = f"*__{self.era}__tt__{self.tree}.json"
-        before = {
-            path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
-        }
-        run_program(command["argv"], cwd=Path(command["cwd"]))
-        after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
-        changed = [path for path in after if before.get(path) != sha256_file(path)]
-        if len(changed) != 1:
-            raise BootstrapError(
-                f"submission command returned but found {len(changed)} new or changed records; "
-                f"intent retained at {intent} for manual reconciliation"
+        try:
+            manifest_dir_index = command["argv"].index("--submission-manifest-dir") + 1
+            manifest_dir = Path(command["argv"][manifest_dir_index])
+            pattern = f"*__{self.era}__tt__{self.tree}.json"
+            before = {
+                path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
+            }
+            run_program(command["argv"], cwd=Path(command["cwd"]))
+            after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
+            changed = [path for path in after if before.get(path) != sha256_file(path)]
+            if len(changed) != 1:
+                raise BootstrapError(
+                    f"submission command returned but found {len(changed)} new or changed records; "
+                    f"intent retained at {intent} for manual reconciliation"
+                )
+        except Exception as exc:
+            failed_intent = json.loads(intent.read_text())
+            failed_intent.update(
+                {
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
             )
+            temporary.write_text(
+                json.dumps(failed_intent, indent=2, sort_keys=True) + "\n"
+            )
+            os.replace(temporary, intent)
+            raise
         record = changed[0].resolve()
         receipt = {
             "schema_version": 1,

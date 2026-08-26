@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow_automation.cli import Repository
+from workflow_automation.cli import BootstrapError, Repository
 from workflow_automation.tasks import (
     DitauInputPreparation,
     DitauEffectiveEventPlan,
@@ -249,6 +249,44 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
             self.assertEqual(receipt["tree"], "Events")
             intent = json.loads(task.intent_path().read_text())
             self.assertEqual(intent["status"], "completed")
+
+    def test_records_submission_failure_in_intent(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = {
+                "tree": "Events",
+                "submits_jobs": True,
+                "cwd": str(root),
+                "argv": [
+                    "/fake/python",
+                    "/fake/run_analysis.py",
+                    "--submission-manifest-dir",
+                    str(root / "submission-records"),
+                ],
+            }
+            plan = {"input_fingerprint": "plan-fingerprint", "commands": [command]}
+            task = DitauEffectiveEventSubmission(
+                production="test",
+                era="Run3_2022",
+                tree="Events",
+                allow_submission=True,
+                workspace=str(root),
+            )
+
+            with patch.object(task, "plan", return_value=plan), patch.object(
+                DitauEffectiveEventReadiness, "complete", return_value=True
+            ), patch(
+                "workflow_automation.tasks.run_program",
+                side_effect=BootstrapError("diagnostic submission failure"),
+            ):
+                with self.assertRaisesRegex(BootstrapError, "diagnostic submission failure"):
+                    task.run()
+
+            intent = json.loads(task.intent_path().read_text())
+            self.assertEqual(intent["status"], "failed")
+            self.assertEqual(intent["error_type"], "BootstrapError")
+            self.assertIn("diagnostic submission failure", intent["error"])
+            self.assertIn("failed_at", intent)
 
 
 class DitauProductionPlanTests(unittest.TestCase):

@@ -217,7 +217,9 @@ This is the only documented automated submission path. Each tree writes a durabl
 invoking HiggsDNA. A successful command must create or change exactly one matching HiggsDNA
 submission record before WorkflowAutomation writes its stable receipt. If the process is interrupted
 or the record is ambiguous, the intent remains and blocks automatic retry; inspect Condor and
-reconcile manually to prevent duplicate jobs. There is no automatic resubmission.
+reconcile manually to prevent duplicate jobs. Submission exceptions are recorded in the durable
+intent with `status: failed`, a timestamp, and the captured error, so terminal scrollback is not
+required for diagnosis. There is no automatic resubmission.
 
 Readiness also starts the HiggsDNA analysis entry point with `--help`. This imports its runtime
 dependencies without processing data or reaching Condor, catching failures such as missing
