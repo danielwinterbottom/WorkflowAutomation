@@ -601,6 +601,13 @@ class DitauEffectiveEventPlan(law.Task):
                     "tree": tree,
                     "submits_jobs": True,
                     "cwd": str(checkout),
+                    # HTCondor submit files use `getenv = True`, and the generated job
+                    # wrappers invoke a bare `python3`. The workers therefore inherit
+                    # whichever interpreter is first on the submitting process's PATH.
+                    # Submitting from the controller virtualenv sends workers a Python
+                    # without the analysis stack, so record the environment the command
+                    # must run under and prepend it at execution time.
+                    "environment_bin": str(python.parent),
                     "argv": [
                         str(python),
                         str(run_analysis),
@@ -782,6 +789,18 @@ class DitauEffectiveEventSubmission(law.Task):
             raise BootstrapError(f"plan has no unique command for tree {self.tree}")
         return matches[0]
 
+    @staticmethod
+    def command_environment(command: dict[str, object]) -> dict[str, str] | None:
+        """Put the command's own environment first on PATH for inherited job environments."""
+        environment_bin = command.get("environment_bin")
+        if not environment_bin:
+            return None
+        environment = dict(os.environ)
+        path = environment.get("PATH", "")
+        entries = [entry for entry in path.split(os.pathsep) if entry and entry != environment_bin]
+        environment["PATH"] = os.pathsep.join([str(environment_bin), *entries])
+        return environment
+
     def command_fingerprint(self) -> str:
         return hashlib.sha256(
             json.dumps(self.command(), sort_keys=True, separators=(",", ":")).encode()
@@ -846,7 +865,11 @@ class DitauEffectiveEventSubmission(law.Task):
             before = {
                 path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
             }
-            output = run_program(command["argv"], cwd=Path(command["cwd"]))
+            output = run_program(
+                command["argv"],
+                cwd=Path(command["cwd"]),
+                env=self.command_environment(command),
+            )
             after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
             changed = [path for path in after if before.get(path) != sha256_file(path)]
             if len(changed) != 1:

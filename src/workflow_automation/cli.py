@@ -204,9 +204,13 @@ def run_git(arguments: Sequence[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def run_program(arguments: Sequence[str], cwd: Path | None = None) -> str:
+def run_program(
+    arguments: Sequence[str], cwd: Path | None = None, env: dict[str, str] | None = None
+) -> str:
     try:
-        result = subprocess.run(arguments, cwd=cwd, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            arguments, cwd=cwd, check=True, capture_output=True, text=True, env=env
+        )
     except FileNotFoundError as exc:
         raise BootstrapError(f"required executable was not found: {arguments[0]}") from exc
     except subprocess.CalledProcessError as exc:

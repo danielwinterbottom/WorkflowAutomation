@@ -243,7 +243,7 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
                 workspace=str(root),
             )
 
-            def fake_run(arguments, cwd=None):
+            def fake_run(arguments, cwd=None, env=None):
                 manifest_dir.mkdir(parents=True, exist_ok=True)
                 record = manifest_dir / "25_08_2026__Run3_2022__tt__Events.json"
                 record.write_text('{"submitted": true}\n')
@@ -338,6 +338,23 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
             intent = json.loads(task.intent_path().read_text())
             self.assertEqual(intent["status"], "failed")
             self.assertEqual(intent["command_output"], str(transcript))
+
+    def test_command_environment_puts_analysis_interpreter_first(self):
+        # Condor submit files use `getenv = True` and the generated job wrappers
+        # call a bare `python3`, so whatever is first on PATH at submission time
+        # is what the workers run.
+        command = {"environment_bin": "/envs/HiggsDNA/bin"}
+        with patch.dict(
+            "os.environ", {"PATH": "/controller/.venv/bin:/usr/bin"}, clear=False
+        ):
+            environment = DitauEffectiveEventSubmission.command_environment(command)
+        self.assertIsNotNone(environment)
+        self.assertEqual(
+            environment["PATH"].split(":")[0], "/envs/HiggsDNA/bin"
+        )
+
+    def test_command_environment_is_inherited_when_unspecified(self):
+        self.assertIsNone(DitauEffectiveEventSubmission.command_environment({}))
 
 
 class DitauProductionPlanTests(unittest.TestCase):

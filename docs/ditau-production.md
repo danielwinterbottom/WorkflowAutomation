@@ -249,6 +249,24 @@ The failed intent references that file in its `command_output` field. Always rea
 first: for this class of failure it holds the only explanation, because the command itself reported
 success.
 
+### The environment the workers inherit
+
+HiggsDNA's generated Condor submit files set `getenv = True`, and its generated job wrappers invoke
+a bare `python3` rather than an absolute interpreter path. The workers therefore run whichever
+`python3` is first on the *submitting* process's `PATH`.
+
+Run by hand, that is the operator's activated HiggsDNA environment and everything works. Driven by
+WorkflowAutomation, the submitting process is the controller virtualenv, which contains only `law`
+and its dependencies. On 26 August 2026 this sent 1530 jobs to workers that died immediately with
+`ModuleNotFoundError: No module named 'numpy'`.
+
+The effective-event plan therefore records `environment_bin` for each command, and the submission
+task prepends it to `PATH` for the child process. The plan stays inspectable: the environment a
+command needs is written down rather than inherited by accident.
+
+Readiness does not catch this class of failure, because it invokes the analysis entry point by
+absolute path. A successful submission means jobs were *submitted*, never that they will run.
+
 ### Reconciling an unresolved intent
 
 Before archiving an intent, confirm that no jobs were actually submitted. Note that
