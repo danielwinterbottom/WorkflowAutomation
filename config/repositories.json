@@ -3,13 +3,16 @@
     "HiggsDNA": {
       "url": "https://gitlab.cern.ch/dwinterb/HiggsDNA.git",
       "revision": "workflowautomation",
-      "commit": "870bc9f3721a464bec08b7e26bf7ed924356ddd1",
+      "commit": "08476dcaf188b534ed24d607e4aedfe51015e549",
       "directory": "HiggsDNA",
       "environment_file": "environment.yml",
       "install_extras": "dev",
       "pip_install_dependencies": false,
       "import_name": "higgs_dna",
-      "validation_imports": ["pkg_resources", "uproot"]
+      "validation_imports": [
+        "pkg_resources",
+        "uproot"
+      ]
     }
   }
 }
