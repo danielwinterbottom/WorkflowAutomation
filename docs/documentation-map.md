@@ -40,6 +40,7 @@ not obviously in sync. TIDAL carries a submodule `TauAnalysis/ClassicSVfit` from
 | [`docs/workflow-steps.md`](workflow-steps.md) | Automated tasks and their manual equivalents |
 | [`docs/operator-guide.md`](operator-guide.md) | Operating and recovery policy |
 | [`docs/ditau-production.md`](ditau-production.md) | CP ditau graph, fingerprints, submission safeguards |
+| [`docs/derived-artefacts.md`](derived-artefacts.md) | Why stitching and params rebuild, or do not |
 | [`docs/batch-resubmission.md`](batch-resubmission.md) | How batch failures are diagnosed and what a retry is given |
 | [`docs/documentation-map.md`](documentation-map.md) | This inventory |
 

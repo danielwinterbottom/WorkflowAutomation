@@ -1585,6 +1585,10 @@ class DitauEffectiveEventCounts(DitauDerivedArtefact):
             "samples_yaml": self.checkout()
             / f"scripts/ditau/pre_processing/samples_{self.era}.yaml",
             "sample_manifest": self.sample_manifest(),
+            # The program too, not just the data. A fix to how weights are summed
+            # changes these numbers while leaving every input identical, so
+            # without this the counts would look current and stay wrong.
+            "generator": self.checkout() / "scripts/ditau/processing/getEffectiveEvents.py",
         }
 
     def effective_output(self) -> Path:
@@ -1638,6 +1642,7 @@ class DitauStitching(DitauDerivedArtefact):
         return {
             "cross_sections": self.checkout() / "scripts/ditau/config/cross_sections.yaml",
             "effective_events": self.config_dir() / "effective_events.yaml",
+            "generator": self.checkout() / "scripts/ditau/processing/getStitchingInfo.py",
         }
 
     def command(self) -> list[str]:
@@ -1672,6 +1677,7 @@ class DitauParams(DitauDerivedArtefact):
             "cross_sections": self.checkout() / "scripts/ditau/config/cross_sections.yaml",
             "effective_events": self.config_dir() / "effective_events.yaml",
             "filter_efficiencies": self.config_dir() / "filter_efficiencies.yaml",
+            "generator": self.checkout() / "scripts/ditau/processing/getParams.py",
         }
 
     def command(self) -> list[str]:
