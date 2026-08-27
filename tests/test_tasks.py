@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from workflow_automation.tasks import (
     DitauInputPreparation,
     DitauEffectiveEventPlan,
     DitauEffectiveEventReadiness,
+    DitauEffectiveEventStatus,
     DitauEffectiveEventSubmission,
     DitauProductionPlan,
     DitauSampleManifest,
@@ -398,6 +400,80 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
                     bumped = task.current_fingerprint()
 
             self.assertNotEqual(original, bumped)
+
+
+class DitauEffectiveEventStatusTests(unittest.TestCase):
+    """A status check that can only ever report success is not a check."""
+
+    MARKER = "Processing 100% \u2501\u2501 3/3"
+
+    def build_jobs_dir(self, root: Path) -> Path:
+        jobs = root / "jobs"
+        jobs.mkdir(parents=True)
+        (jobs / "AN-Sample.sub").write_text("executable = x\nqueue 3\n")
+        # proc 0 finished, proc 1 ran but never reached the end, proc 2 never ran
+        (jobs / "AN-Sample.100.0.out").write_text(f"working\n{self.MARKER}\n")
+        (jobs / "AN-Sample.100.1.out").write_text("started and then died\n")
+        return jobs
+
+    def status_task(self, root: Path) -> DitauEffectiveEventStatus:
+        return DitauEffectiveEventStatus(
+            production="test", era="Run3_2022", tree="Events", workspace=str(root)
+        )
+
+    def test_distinguishes_completed_failed_and_pending(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build_jobs_dir(root)
+            result = self.status_task(root).classify(jobs)
+
+            self.assertEqual(
+                result["totals"],
+                {"expected": 3, "completed": 1, "failed": 1, "pending": 1},
+            )
+            self.assertEqual(len(result["failures"]), 1)
+            self.assertEqual(result["failures"][0]["proc"], 1)
+
+    def test_uses_the_most_recent_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build_jobs_dir(root)
+            # A resubmission writes a new cluster id for the same proc. The later
+            # attempt succeeded, so the job must no longer count as failed.
+            retry = jobs / "AN-Sample.200.1.out"
+            retry.write_text(f"retried\n{self.MARKER}\n")
+            os.utime(retry, (10**9, 10**9))
+            for stale in jobs.glob("AN-Sample.100.*.out"):
+                os.utime(stale, (10**8, 10**8))
+
+            result = self.status_task(root).classify(jobs)
+            self.assertEqual(result["totals"]["failed"], 0)
+            self.assertEqual(result["totals"]["completed"], 2)
+
+    def test_refuses_to_report_without_a_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaisesRegex(BootstrapError, "no submission receipt"):
+                self.status_task(root).jobs_directory()
+
+    def test_never_reports_itself_complete(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.assertFalse(self.status_task(root).complete())
+
+    def test_queue_count_ignores_unrelated_jobs(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = root / "jobs"
+            # The operator runs other work under the same account on the same schedd.
+            listing = f"{jobs}/AN-Sample.sh\n/vols/cms/other/TauPolaris/train.sh\n"
+            with patch("workflow_automation.tasks.shutil.which", return_value="/usr/bin/condor_q"), \
+                 patch("workflow_automation.tasks.run_program", return_value=listing):
+                self.assertEqual(DitauEffectiveEventStatus.queued_job_count(jobs), 1)
+
+    def test_queue_count_is_unknown_when_condor_is_absent(self):
+        with patch("workflow_automation.tasks.shutil.which", return_value=None):
+            self.assertIsNone(DitauEffectiveEventStatus.queued_job_count(Path("/x")))
 
 
 class DitauProductionPlanTests(unittest.TestCase):

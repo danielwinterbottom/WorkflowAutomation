@@ -952,3 +952,154 @@ class DitauEffectiveEventSubmissions(law.WrapperTask):
             DitauEffectiveEventSubmission(tree=tree, **common)
             for tree in ("Events", "EventsNotSelected")
         ]
+
+
+class DitauEffectiveEventStatus(law.Task):
+    """Report what happened to a submitted tree's jobs without changing anything.
+
+    A submission receipt proves that jobs were submitted. It says nothing about
+    whether they ran. This task closes that gap and never submits, resubmits, or
+    moves anything.
+
+    A job counts as completed when its standard output contains HiggsDNA's own
+    completion marker, so this agrees with what `resubmit_jobs_condor.py` would
+    decide rather than inventing a second, competing definition of success.
+    """
+
+    COMPLETION_MARKER = "Processing 100%"
+    TAIL_BYTES = 256_000
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    tree = luigi.ChoiceParameter(choices=("Events", "EventsNotSelected"))
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def state_dir(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+            / "effective-events"
+            / str(self.era)
+        )
+
+    def receipt_path(self) -> Path:
+        return self.state_dir() / "submission-receipts" / f"{self.tree}.json"
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.state_dir() / "status" / f"{self.tree}.json"))
+
+    def complete(self) -> bool:
+        # Job state changes underneath us, so a previous report never means the
+        # current one is known. Always re-probe.
+        return False
+
+    def jobs_directory(self) -> Path:
+        receipt_path = self.receipt_path()
+        if not receipt_path.is_file():
+            raise BootstrapError(
+                f"no submission receipt for tree {self.tree!r} at {receipt_path}; "
+                "there is nothing to report on until a submission has been receipted"
+            )
+        receipt = json.loads(receipt_path.read_text())
+        record = Path(receipt["submission_record"])
+        if not record.is_file():
+            raise BootstrapError(f"submission record is missing: {record}")
+        return Path(json.loads(record.read_text())["jobs_dir"])
+
+    @classmethod
+    def marker_present(cls, path: Path) -> bool:
+        """Look for the completion marker in the tail, as HiggsDNA itself does."""
+        try:
+            with path.open("rb") as stream:
+                try:
+                    stream.seek(-cls.TAIL_BYTES, os.SEEK_END)
+                except OSError:
+                    stream.seek(0)
+                return cls.COMPLETION_MARKER.encode() in stream.read()
+        except OSError:
+            return False
+
+    @staticmethod
+    def queued_job_count(jobs_dir: Path) -> int | None:
+        """Count this tree's jobs still in the queue, or None if Condor cannot be read.
+
+        Matching is by executable path. A bare owner query would also count the
+        operator's unrelated work on the same schedd.
+        """
+        if not shutil.which("condor_q"):
+            return None
+        try:
+            listing = run_program(["condor_q", os.environ.get("USER", ""), "-af", "Cmd"])
+        except BootstrapError:
+            return None
+        prefix = str(jobs_dir)
+        return sum(1 for line in listing.splitlines() if line.strip().startswith(prefix))
+
+    def classify(self, jobs_dir: Path) -> dict[str, object]:
+        datasets: dict[str, dict[str, int]] = {}
+        failures: list[dict[str, object]] = []
+        for submit_file in sorted(jobs_dir.glob("*.sub")):
+            job_id = submit_file.stem
+            expected = None
+            for line in submit_file.read_text().splitlines():
+                if line.startswith("queue"):
+                    parts = line.split()
+                    expected = int(parts[1]) if len(parts) > 1 else 1
+                    break
+            if expected is None:
+                raise BootstrapError(f"no queue line in submit file: {submit_file}")
+
+            counts = {"expected": expected, "completed": 0, "failed": 0, "pending": 0}
+            for index in range(expected):
+                # Condor writes <job>.<cluster>.<proc>.out; a resubmitted job adds
+                # another cluster, so take the most recent attempt.
+                candidates = sorted(
+                    jobs_dir.glob(f"{job_id}.*.{index}.out"),
+                    key=lambda item: item.stat().st_mtime,
+                )
+                if not candidates:
+                    counts["pending"] += 1
+                elif self.marker_present(candidates[-1]):
+                    counts["completed"] += 1
+                else:
+                    counts["failed"] += 1
+                    failures.append({"job": job_id, "proc": index, "output": str(candidates[-1])})
+            datasets[job_id] = counts
+
+        totals = {key: 0 for key in ("expected", "completed", "failed", "pending")}
+        for counts in datasets.values():
+            for key in totals:
+                totals[key] += counts[key]
+        return {"datasets": datasets, "totals": totals, "failures": failures}
+
+    def run(self) -> None:
+        jobs_dir = self.jobs_directory()
+        classified = self.classify(jobs_dir)
+        totals = classified["totals"]
+        queued = self.queued_job_count(jobs_dir)
+        report = {
+            "schema_version": 1,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "tree": str(self.tree),
+            "jobs_dir": str(jobs_dir),
+            "queued_now": queued,
+            "totals": totals,
+            "datasets": classified["datasets"],
+            "failures": classified["failures"],
+        }
+        self.output().dump(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+        pending = totals["pending"]
+        print(
+            f"[status] {self.tree}: {totals['completed']}/{totals['expected']} completed, "
+            f"{totals['failed']} failed, {pending} pending"
+            + (f", {queued} still queued" if queued is not None else ", queue unreadable")
+        )
