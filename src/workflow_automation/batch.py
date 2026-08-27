@@ -38,17 +38,65 @@ class NodeClass:
 
 
 @dataclass(frozen=True)
-class Resources:
-    request_cpus: int
-    request_memory_mb: int
-    runtime_seconds: int
+class Slot:
+    """One concrete way to run a job: a node class and a number of cores."""
+
+    node_class: NodeClass
+    cpus: int
+
+    @property
+    def runtime_seconds(self) -> int:
+        # Stay a second inside the class limit, as the existing submit files do.
+        return self.node_class.max_runtime_seconds - 1
+
+    @property
+    def memory_mb(self) -> int:
+        return self.node_class.memory_per_slot_mb * self.cpus
+
+    @property
+    def cost(self) -> tuple[int, int, int]:
+        """Cheapest first: fewest cores, then shortest class, then smallest slot.
+
+        Cores lead because a single-threaded job handed two slots wastes one.
+        Class length comes next so a job that needs ten hours is not sent to the
+        forty-eight hour queue for no reason.
+        """
+        return (self.cpus, self.node_class.max_runtime_seconds, self.node_class.memory_per_slot_mb)
 
     def submit_lines(self, runtime_attribute: str) -> list[str]:
         return [
-            f"request_cpus = {self.request_cpus}",
-            f"request_memory = {self.request_memory_mb}",
+            f"request_cpus = {self.cpus}",
+            f"request_memory = {self.memory_mb}",
             f"{runtime_attribute} = {self.runtime_seconds}",
         ]
+
+    def describe(self) -> str:
+        return (
+            f"{self.node_class.name} x{self.cpus} "
+            f"({self.runtime_seconds / 3600:.0f}h, {self.memory_mb}MB)"
+        )
+
+
+@dataclass(frozen=True)
+class Demand:
+    """What a job has been *shown* to need, from the failures actually seen.
+
+    Only observed failures raise these floors. A job that ran out of time has
+    demonstrated nothing about its memory, so escalating its wall clock must not
+    drag along whatever memory its previous slot happened to provide.
+    """
+
+    minimum_runtime_seconds: int = 0
+    minimum_memory_mb: int = 0
+
+    def after(self, cause: str, slot: "Slot") -> "Demand":
+        if cause == WALLTIME:
+            return Demand(max(self.minimum_runtime_seconds, slot.runtime_seconds + 1),
+                          self.minimum_memory_mb)
+        if cause == MEMORY:
+            return Demand(self.minimum_runtime_seconds,
+                          max(self.minimum_memory_mb, slot.memory_mb + 1))
+        return self
 
 
 @dataclass(frozen=True)
@@ -57,80 +105,45 @@ class Site:
     runtime_attribute: str
     node_classes: tuple[NodeClass, ...]
     max_cpus_per_job: int
-    runtime_ladder: tuple[int, ...]
-    memory_ladder: tuple[int, ...]
     max_attempts: int
+
+    def slots(self) -> list[Slot]:
+        options = [
+            Slot(node_class=item, cpus=cpus)
+            for item in self.node_classes
+            for cpus in range(1, self.max_cpus_per_job + 1)
+        ]
+        return sorted(options, key=lambda item: item.cost)
 
     def classes_for(self, runtime_seconds: int) -> list[NodeClass]:
         return [item for item in self.node_classes if item.max_runtime_seconds >= runtime_seconds]
 
-    def resolve(self, runtime_seconds: int, memory_mb: int) -> Resources:
-        """Turn a wall time and a memory need into a schedulable request.
-
-        Cores are derived from the *largest* per-slot memory among the classes
-        that can host this wall time, because extra cores are a cost to be
-        avoided: a single-threaded job given two slots wastes one.
-
-        This is also where wall time and memory stop being independent. A three
-        hour job can land on short-highmem and get 12GB on one core, but asking
-        for ten hours restricts it to medium and long, where a slot is 4GB, so
-        the same memory now costs more cores.
-        """
-        eligible = self.classes_for(runtime_seconds)
-        if not eligible:
-            longest = max(item.max_runtime_seconds for item in self.node_classes)
-            raise BootstrapError(
-                f"{runtime_seconds}s exceeds the longest node class at site {self.name!r} "
-                f"({longest}s); no resubmission can succeed and the work needs splitting"
-            )
-        per_slot = max(item.memory_per_slot_mb for item in eligible)
-        cpus = max(1, math.ceil(memory_mb / per_slot))
-        if cpus > self.max_cpus_per_job:
-            raise BootstrapError(
-                f"{memory_mb}MB within {runtime_seconds}s needs {cpus} cores at site "
-                f"{self.name!r}, above the configured maximum of {self.max_cpus_per_job}. "
-                "This is a deliberate stop rather than a farm limit: needing more cores "
-                "means the memory per job is too high, and the work should be split "
-                "differently instead. Raise max_cpus_per_job in the batch configuration "
-                "if you would rather trade that away."
-            )
-        return Resources(
-            request_cpus=cpus, request_memory_mb=memory_mb, runtime_seconds=runtime_seconds
+    def select(self, demand: Demand) -> Slot:
+        """Cheapest slot that satisfies everything the job has been shown to need."""
+        for slot in self.slots():
+            if (
+                slot.runtime_seconds >= demand.minimum_runtime_seconds
+                and slot.memory_mb >= demand.minimum_memory_mb
+            ):
+                return slot
+        raise BootstrapError(
+            f"no slot at site {self.name!r} provides at least "
+            f"{demand.minimum_runtime_seconds}s and {demand.minimum_memory_mb}MB within "
+            f"{self.max_cpus_per_job} core(s). This is a deliberate stop rather than a farm "
+            "limit: the work should be split differently instead. Raise max_cpus_per_job in "
+            "the batch configuration if you would rather trade that away."
         )
 
-    def next_step(self, cause: str, current: Resources | None) -> Resources:
-        """Advance only the axis that caused the failure.
-
-        Wall time and memory have separate ladders on purpose. Giving a job that
-        ran out of time more memory, or vice versa, produces a retry that fails
-        in exactly the same way while costing more of the farm. Holding the other
-        axis steady also keeps the core count as low as the site allows.
-        """
+    def next_step(self, cause: str, slot: Slot | None, demand: Demand | None = None) -> tuple[Slot, Demand]:
+        """Escalate only what the observed failure actually demonstrated."""
         if cause not in RETRYABLE:
             raise BootstrapError(f"failure cause {cause!r} is not resubmittable")
-        if current is None:
-            return self.resolve(self.runtime_ladder[0], self.memory_ladder[0])
-
-        if cause == WALLTIME:
-            longer = [item for item in self.runtime_ladder if item > current.runtime_seconds]
-            if not longer:
-                raise BootstrapError(
-                    f"no configured wall time beyond {current.runtime_seconds}s at site "
-                    f"{self.name!r}; the work needs splitting rather than resubmitting"
-                )
-            return self.resolve(longer[0], current.request_memory_mb)
-
-        if cause == MEMORY:
-            larger = [item for item in self.memory_ladder if item > current.request_memory_mb]
-            if not larger:
-                raise BootstrapError(
-                    f"no configured memory beyond {current.request_memory_mb}MB at site "
-                    f"{self.name!r}; the job needs investigating rather than resubmitting"
-                )
-            return self.resolve(current.runtime_seconds, larger[0])
-
-        # Nothing about the job was wrong, so retry it exactly as it was.
-        return current
+        current = demand or Demand()
+        if slot is None:
+            chosen = self.select(current)
+            return chosen, current
+        updated = current.after(cause, slot)
+        return self.select(updated), updated
 
 
 def load_site(config_path: Path, name: str) -> Site:
@@ -156,19 +169,11 @@ def load_site(config_path: Path, name: str) -> Site:
     if not classes:
         raise BootstrapError(f"batch site {name!r} declares no node classes")
     escalation = site.get("escalation", {})
-    runtime_ladder = tuple(int(item) for item in escalation.get("runtime_seconds", ()))
-    memory_ladder = tuple(int(item) for item in escalation.get("memory_mb", ()))
-    if not runtime_ladder or not memory_ladder:
-        raise BootstrapError(
-            f"batch site {name!r} must declare escalation.runtime_seconds and escalation.memory_mb"
-        )
     return Site(
         name=name,
         runtime_attribute=site.get("runtime_attribute", "+MaxRuntime"),
         node_classes=classes,
         max_cpus_per_job=int(site.get("max_cpus_per_job", 1)),
-        runtime_ladder=tuple(sorted(runtime_ladder)),
-        memory_ladder=tuple(sorted(memory_ladder)),
         max_attempts=int(escalation.get("max_attempts", 3)),
     )
 
