@@ -178,8 +178,13 @@ def load_site(config_path: Path, name: str) -> Site:
     )
 
 
-# Condor states its own reasons in the job log; the application states its in stderr.
+# Condor states its own reasons in the job log; the application states its in
+# stderr. These patterns are matched against what this farm actually writes, not
+# against what the manual suggests it might. Imperial enforces limits by holding
+# jobs through SYSTEM_PERIODIC_HOLD, so the reason line is what carries the cause
+# and the words "MaxRuntime" and "maximum" never appear.
 _WALLTIME_PATTERNS = (
+    re.compile(r"wall\s*time\s+exceeded", re.IGNORECASE),
     re.compile(r"MaxRuntime", re.IGNORECASE),
     re.compile(r"max(imum)?\s+(wall\s*)?(clock|runtime|time)\s+exceeded", re.IGNORECASE),
     re.compile(r"job\s+ran\s+for\s+too\s+long", re.IGNORECASE),
@@ -189,6 +194,7 @@ _MEMORY_PATTERNS = (
     re.compile(r"exceeded\s+memory", re.IGNORECASE),
     re.compile(r"out\s+of\s+memory", re.IGNORECASE),
     re.compile(r"\bOOM\b"),
+    re.compile(r"MemoryError"),
 )
 _APPLICATION_PATTERNS = (
     re.compile(r"^Traceback \(most recent call last\)", re.MULTILINE),
@@ -202,20 +208,28 @@ _INFRASTRUCTURE_PATTERNS = (
     re.compile(r"failed to execute", re.IGNORECASE),
     re.compile(r"transfer\s+.*fail", re.IGNORECASE),
 )
+_HELD_PATTERN = re.compile(r"Job was held|Job held by", re.IGNORECASE)
 
 
 def classify_failure(log_text: str = "", stderr_text: str = "", stdout_text: str = "") -> str:
     """Say why a job did not finish, from what Condor and the job itself recorded.
 
-    Resource limits are checked before application errors: a job killed for
+    Resource limits are read before application errors: a job killed for
     exceeding its memory often dies mid-traceback, and reading that traceback as
     a code fault would stop us retrying something a larger slot would complete.
+
+    A hold whose reason is not recognised returns UNKNOWN rather than something
+    retryable. Holds are how this farm enforces its limits, so an unrecognised
+    one is a limit we have not learned to read, and retrying it unchanged would
+    simply hit the same limit again.
     """
     condor = log_text or ""
     if any(pattern.search(condor) for pattern in _MEMORY_PATTERNS):
         return MEMORY
     if any(pattern.search(condor) for pattern in _WALLTIME_PATTERNS):
         return WALLTIME
+    if _HELD_PATTERN.search(condor):
+        return UNKNOWN
     combined = f"{stderr_text}\n{stdout_text}"
     if any(pattern.search(combined) for pattern in _MEMORY_PATTERNS):
         return MEMORY

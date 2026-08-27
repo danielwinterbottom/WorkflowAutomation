@@ -5,6 +5,7 @@ from pathlib import Path
 
 from workflow_automation.batch import (
     APPLICATION,
+    UNKNOWN,
     Demand,
     INFRASTRUCTURE,
     MEMORY,
@@ -113,6 +114,28 @@ class EscalationTests(unittest.TestCase):
 class FailureClassificationTests(unittest.TestCase):
     def test_condor_memory_kill(self):
         self.assertEqual(classify_failure(log_text="Job was held: memory usage exceeded"), MEMORY)
+
+    def test_the_real_imperial_walltime_hold(self):
+        """The exact text this farm writes, captured from a deliberately overrun job.
+
+        Guessed patterns missed it: Imperial holds the job through
+        SYSTEM_PERIODIC_HOLD and says "wall time exceeded", so neither
+        "MaxRuntime" nor "maximum" appears anywhere. The classifier previously
+        fell through to `incomplete` and would have retried the job with the
+        same wall clock until the attempt cap stopped it.
+        """
+        log = (Path(__file__).parent / "fixtures" / "condor-walltime-hold.log").read_text()
+        self.assertEqual(classify_failure(log_text=log), WALLTIME)
+
+    def test_a_hold_we_cannot_read_is_not_blindly_retried(self):
+        # Holds are how this farm enforces limits. An unrecognised one is a limit
+        # we have not learned to read, so retrying unchanged would just hit it again.
+        log = "012 (1.0.0) Job was held.\n\tJob held by SYSTEM_PERIODIC_HOLD due to something new.\n"
+        self.assertEqual(classify_failure(log_text=log), UNKNOWN)
+
+    def test_a_memory_hold_is_still_read_as_memory(self):
+        log = "012 (1.0.0) Job was held.\n\tJob held by SYSTEM_PERIODIC_HOLD due to memory usage exceeded.\n"
+        self.assertEqual(classify_failure(log_text=log), MEMORY)
 
     def test_condor_walltime_kill(self):
         self.assertEqual(

@@ -1,0 +1,18 @@
+000 (4797750.000.000) 2026-08-27 15:38:38 Job submitted from host: <146.179.108.134:9618?addrs=146.179.108.134-9618&alias=htcmaster00.hep.ph.ic.ac.uk&noUDP&sock=schedd_978_67b6>
+...
+001 (4797750.000.000) 2026-08-27 15:39:50 Job executing on host: <146.179.108.59:9618?addrs=146.179.108.59-9618+[2a0c-5bc0-88-111-92e2-baff-fe9b-916c]-9618&alias=lxa07.hep.ph.ic.ac.uk&noUDP&sock=startd_1918_2abc>
+	SlotName: slot1_4@lxa07.hep.ph.ic.ac.uk
+	CondorScratchDir = "/srv/localstage/condor/dir_52712"
+	Cpus = 1
+	Disk = 2049024
+	GPUs = 0
+	Memory = 4000
+...
+006 (4797750.000.000) 2026-08-27 15:39:59 Image size of job updated: 380
+	1  -  MemoryUsage of job (MB)
+	380  -  ResidentSetSize of job (KB)
+...
+012 (4797750.000.000) 2026-08-27 15:40:59 Job was held.
+	Job held by SYSTEM_PERIODIC_HOLD due to wall time exceeded.
+	Code 26 Subcode 0
+...
