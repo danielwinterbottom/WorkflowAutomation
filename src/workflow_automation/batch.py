@@ -94,13 +94,16 @@ class Demand:
     minimum_runtime_seconds: int = 0
     minimum_memory_mb: int = 0
 
-    def after(self, cause: str, slot: "Slot") -> "Demand":
+    def after(self, cause: str, runtime_seconds: int, memory_mb: int) -> "Demand":
+        """Raise the floor on whichever axis the failure demonstrated, and only that one."""
         if cause == WALLTIME:
-            return Demand(max(self.minimum_runtime_seconds, slot.runtime_seconds + 1),
-                          self.minimum_memory_mb)
+            return Demand(
+                max(self.minimum_runtime_seconds, runtime_seconds + 1), self.minimum_memory_mb
+            )
         if cause == MEMORY:
-            return Demand(self.minimum_runtime_seconds,
-                          max(self.minimum_memory_mb, slot.memory_mb + 1))
+            return Demand(
+                self.minimum_runtime_seconds, max(self.minimum_memory_mb, memory_mb + 1)
+            )
         return self
 
 
@@ -141,14 +144,54 @@ class Site:
 
     def next_step(self, cause: str, slot: Slot | None, demand: Demand | None = None) -> tuple[Slot, Demand]:
         """Escalate only what the observed failure actually demonstrated."""
+        if slot is None:
+            if cause not in RETRYABLE:
+                raise BootstrapError(f"failure cause {cause!r} is not resubmittable")
+            current = demand or Demand()
+            return self.select(current), current
+        return self.escalate(cause, slot.runtime_seconds, slot.memory_mb, demand)
+
+    def escalate(
+        self,
+        cause: str,
+        runtime_seconds: int,
+        memory_mb: int,
+        demand: Demand | None = None,
+    ) -> tuple[Slot, Demand]:
+        """Escalate from whatever the job actually ran with.
+
+        Taking plain numbers rather than a Slot matters for the first retry: the
+        job's original submit file is the truth about what it ran with, and that
+        need not correspond to any slot this policy would have chosen.
+        """
         if cause not in RETRYABLE:
             raise BootstrapError(f"failure cause {cause!r} is not resubmittable")
-        current = demand or Demand()
-        if slot is None:
-            chosen = self.select(current)
-            return chosen, current
-        updated = current.after(cause, slot)
+        updated = (demand or Demand()).after(cause, runtime_seconds, memory_mb)
         return self.select(updated), updated
+
+
+SUBMIT_VALUE = re.compile(r"^\s*([+]?\w+)\s*=\s*(.+?)\s*$")
+
+
+def read_submit_resources(submit_file: Path, runtime_attribute: str) -> tuple[int, int, int]:
+    """Read cores, memory and wall clock back out of an existing submit file."""
+    values: dict[str, str] = {}
+    for line in submit_file.read_text().splitlines():
+        matched = SUBMIT_VALUE.match(line)
+        if matched:
+            values[matched.group(1).lower()] = matched.group(2)
+
+    def number(key: str, default: int) -> int:
+        try:
+            return int(float(values.get(key.lower(), default)))
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        number("request_cpus", 1),
+        number("request_memory", 0),
+        number(runtime_attribute, 0),
+    )
 
 
 def load_site(config_path: Path, name: str) -> Site:

@@ -627,6 +627,138 @@ class DitauEffectiveEventResubmissionTests(unittest.TestCase):
                 task.run()
 
 
+class ResubmissionGenerationTests(unittest.TestCase):
+    """The generated submit files are what the farm actually acts on."""
+
+    MARKER = "Processing 100% \u2501\u2501 3/3"
+    HOLD = (
+        "012 (100.001.000) Job was held.\n"
+        "\tJob held by SYSTEM_PERIODIC_HOLD due to wall time exceeded.\n...\n"
+    )
+
+    def build(self, root: Path, stderr: str = "", log: str = "") -> Path:
+        jobs = root / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        # The original submission: three hours, 8GB, one core.
+        (jobs / "AN-Sample.sub").write_text(
+            "executable = x\nrequest_cpus = 1\nrequest_memory = 8000\n"
+            "+MaxRuntime = 10799\nqueue 2\n"
+        )
+        (jobs / "AN-Sample.sh").write_text("#!/bin/sh\necho hi\n")
+        (jobs / "AN-Sample.100.0.out").write_text(f"ok\n{self.MARKER}\n")
+        (jobs / "AN-Sample.100.1.out").write_text("died\n")
+        if stderr:
+            (jobs / "AN-Sample.100.1.err").write_text(stderr)
+        (jobs / "AN-Sample.100.log").write_text(log or self.HOLD)
+
+        task = self.task(root)
+        state = task.state_dir()
+        record = state / "submission-records" / "rec.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"jobs_dir": str(jobs)}))
+        receipt = state / "submission-receipts" / "Events.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({"submission_record": str(record)}))
+        (state / "plan.json").write_text(
+            json.dumps(
+                {
+                    "commands": [
+                        {"tree": "Events", "cwd": str(root),
+                         "environment_bin": str(root / "envbin")}
+                    ]
+                }
+            )
+        )
+        return jobs
+
+    def task(self, root: Path, allow=True):
+        return DitauEffectiveEventResubmission(
+            production="test", era="Run3_2022", tree="Events",
+            allow_submission=allow, workspace=str(root),
+        )
+
+    def run_task(self, root: Path):
+        calls = []
+        task = self.task(root)
+        with patch(
+            "workflow_automation.tasks.run_program",
+            side_effect=lambda argv, cwd=None, env=None: calls.append(argv) or "",
+        ):
+            task.run()
+        return task, calls
+
+    def test_a_timeout_is_resubmitted_as_a_single_core_medium_job(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build(root)
+            task, calls = self.run_task(root)
+
+            submitted = jobs / "workflow_resubmit" / "AN-Sample.1.sub"
+            self.assertTrue(submitted.is_file())
+            body = submitted.read_text()
+            self.assertIn("request_cpus = 1", body)
+            self.assertIn("request_memory = 4000", body)
+            self.assertIn("+MaxRuntime = 35999", body)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "condor_submit")
+
+    def test_the_submit_file_keeps_the_original_output_naming(self):
+        # The status task finds the newest attempt by globbing these names, so a
+        # retry writing elsewhere would look like it never ran.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build(root)
+            self.run_task(root)
+            body = (jobs / "workflow_resubmit" / "AN-Sample.1.sub").read_text()
+            self.assertIn(str(jobs / "AN-Sample.$(ClusterId).1.out"), body)
+            self.assertIn("arguments = 1", body)
+
+    def test_the_workers_still_inherit_the_submitting_environment(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build(root)
+            self.run_task(root)
+            self.assertIn(
+                "getenv = True", (jobs / "workflow_resubmit" / "AN-Sample.1.sub").read_text()
+            )
+
+    def test_an_application_failure_is_never_resubmitted(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.build(
+                root,
+                stderr="Traceback (most recent call last):\nModuleNotFoundError: no numpy\n",
+                log="000 (100.001.000) Job submitted\n...\n",
+            )
+            with self.assertRaisesRegex(BootstrapError, "nothing can be resubmitted"):
+                self.task(root).run()
+
+    def test_demonstrated_needs_survive_into_the_next_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.build(root)
+            task, _ = self.run_task(root)
+
+            recorded = json.loads(task.state_path().read_text())["jobs"]["AN-Sample:1"]
+            self.assertEqual(recorded["attempts"], 1)
+            # It overran three hours, so it must never be offered three hours again.
+            self.assertEqual(recorded["minimum_runtime_seconds"], 10800)
+            # It said nothing about memory, so no floor was invented for it.
+            self.assertEqual(recorded["minimum_memory_mb"], 0)
+
+    def test_attempts_are_capped(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.build(root)
+            task = self.task(root)
+            task.save_state(
+                {"AN-Sample:1": {"attempts": 3, "minimum_runtime_seconds": 0,
+                                 "minimum_memory_mb": 0}}
+            )
+            with self.assertRaisesRegex(BootstrapError, "nothing can be resubmitted"):
+                task.run()
+
+
 class DitauProductionPlanTests(unittest.TestCase):
     def test_requires_higgsdna_environment(self):
         requirement = DitauProductionPlan().requires()

@@ -1240,6 +1240,62 @@ class DitauEffectiveEventResubmission(law.Task):
             raise BootstrapError(f"plan has no unique command for tree {self.tree}")
         return matches[0]
 
+    DEFAULT_BATCH_CONFIG = DEFAULT_CONFIG.parent / "batch.json"
+
+    batch_config = luigi.Parameter(default=str(DEFAULT_BATCH_CONFIG), significant=False)
+    site = luigi.Parameter(default="imperial", significant=False)
+
+    def state_path(self) -> Path:
+        return self.state_dir() / "resubmission-state" / f"{self.tree}.json"
+
+    def load_state(self) -> dict[str, dict[str, object]]:
+        path = self.state_path()
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text()).get("jobs", {})
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_state(self, jobs: dict[str, dict[str, object]]) -> None:
+        path = self.state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {"schema_version": 1, "tree": str(self.tree), "jobs": jobs},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, path)
+
+    @staticmethod
+    def submit_file_for(jobs_dir: Path, job_id: str, proc: int, slot, runtime_attribute: str) -> Path:
+        """Write a submit file for one job, matching the original output naming.
+
+        The names must match what the original submission produced, because the
+        status task finds a job's latest attempt by globbing them and taking the
+        newest. A retry that wrote elsewhere would look like it never ran.
+        """
+        target = jobs_dir / "workflow_resubmit" / f"{job_id}.{proc}.sub"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"executable = {jobs_dir / (job_id + '.sh')}",
+            f"arguments = {proc}",
+            f"output = {jobs_dir / (job_id + '.$(ClusterId).' + str(proc) + '.out')}",
+            f"error = {jobs_dir / (job_id + '.$(ClusterId).' + str(proc) + '.err')}",
+            f"log = {jobs_dir / (job_id + '.$(ClusterId).log')}",
+            # The job wrapper invokes a bare python3, so the workers take their
+            # interpreter from the PATH this process is submitting with.
+            "getenv = True",
+            *slot.submit_lines(runtime_attribute),
+            "queue 1",
+        ]
+        target.write_text("\n".join(lines) + "\n")
+        return target
+
     def run(self) -> None:
         if not self.allow_submission:
             raise BootstrapError(
@@ -1257,6 +1313,7 @@ class DitauEffectiveEventResubmission(law.Task):
         if outstanding == 0:
             raise BootstrapError("nothing to resubmit; no job is failed or pending")
 
+        site = batch.load_site(Path(str(self.batch_config)), str(self.site))
         intent = self.intent_path()
         if intent.exists():
             raise BootstrapError(
@@ -1266,18 +1323,49 @@ class DitauEffectiveEventResubmission(law.Task):
 
         command = self.plan_command()
         checkout = Path(command["cwd"])
-        environment_bin = command.get("environment_bin")
-        script = checkout / "scripts/ditau/processing/resubmit_jobs_condor.py"
-        if not script.is_file():
-            raise BootstrapError(f"resubmission script is missing: {script}")
-        argv = [str(Path(str(environment_bin)) / "python"), str(script), str(jobs_dir)]
+        history = self.load_state()
+
+        planned: list[dict[str, object]] = []
+        skipped: list[dict[str, object]] = []
+        for failure in classified["failures"]:
+            key = f"{failure['job']}:{failure['proc']}"
+            record = history.get(key, {})
+            attempts = int(record.get("attempts", 0))
+            if attempts >= site.max_attempts:
+                skipped.append({**failure, "reason": f"already retried {attempts} time(s)"})
+                continue
+            demand = batch.Demand(
+                int(record.get("minimum_runtime_seconds", 0)),
+                int(record.get("minimum_memory_mb", 0)),
+            )
+            cpus, memory, runtime = batch.read_submit_resources(
+                jobs_dir / f"{failure['job']}.sub", site.runtime_attribute
+            )
+            try:
+                slot, updated = site.escalate(
+                    str(failure["cause"]), runtime, memory, demand
+                )
+            except BootstrapError as exc:
+                skipped.append({**failure, "reason": str(exc)})
+                continue
+            planned.append(
+                {"failure": failure, "key": key, "slot": slot, "demand": updated,
+                 "attempts": attempts}
+            )
+
+        if not planned:
+            raise BootstrapError(
+                f"nothing can be resubmitted: {len(skipped)} outstanding job(s) are either "
+                "not retryable, out of attempts, or beyond what this site can provide. "
+                f"See the status report at {self.status().output().path}"
+            )
 
         intent.parent.mkdir(parents=True, exist_ok=True)
         temporary = intent.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "production": str(self.production),
                     "era": str(self.era),
@@ -1285,6 +1373,17 @@ class DitauEffectiveEventResubmission(law.Task):
                     "jobs_dir": str(jobs_dir),
                     "outstanding_before": outstanding,
                     "totals_before": classified["totals"],
+                    "causes_before": classified["causes"],
+                    "planned": [
+                        {"job": item["key"], "cause": item["failure"]["cause"],
+                         "slot": item["slot"].describe()}
+                        for item in planned
+                    ],
+                    "skipped": [
+                        {"job": f"{item['job']}:{item['proc']}", "cause": item["cause"],
+                         "reason": item["reason"]}
+                        for item in skipped
+                    ],
                     "status": "started",
                 },
                 indent=2,
@@ -1294,17 +1393,32 @@ class DitauEffectiveEventResubmission(law.Task):
         )
         os.replace(temporary, intent)
 
+        environment = DitauEffectiveEventSubmission.command_environment(command)
+        submitted: list[dict[str, object]] = []
         try:
-            # The generated submit files use `getenv = True`, so the resubmitted
-            # jobs inherit this PATH exactly as the original submission did.
-            output = run_program(
-                argv,
-                cwd=checkout,
-                env=DitauEffectiveEventSubmission.command_environment(command),
-            )
-            transcript = intent.with_name(f"{self.tree}.command-output.log")
-            transcript.write_text(output + "\n")
+            for item in planned:
+                failure = item["failure"]
+                submit_file = self.submit_file_for(
+                    jobs_dir, str(failure["job"]), int(failure["proc"]),
+                    item["slot"], site.runtime_attribute,
+                )
+                run_program(["condor_submit", str(submit_file)], cwd=checkout, env=environment)
+                history[str(item["key"])] = {
+                    "attempts": item["attempts"] + 1,
+                    "minimum_runtime_seconds": item["demand"].minimum_runtime_seconds,
+                    "minimum_memory_mb": item["demand"].minimum_memory_mb,
+                    "last_cause": failure["cause"],
+                    "last_slot": item["slot"].describe(),
+                    "last_resubmitted_at": datetime.now(timezone.utc).isoformat(),
+                }
+                submitted.append(
+                    {"job": item["key"], "cause": failure["cause"],
+                     "slot": item["slot"].describe(), "submit_file": str(submit_file)}
+                )
         except Exception as exc:
+            # Persist whatever did go out before recording the failure, so a
+            # partial resubmission is not repeated on top of itself.
+            self.save_state(history)
             failed = json.loads(intent.read_text())
             failed.update(
                 {
@@ -1312,22 +1426,31 @@ class DitauEffectiveEventResubmission(law.Task):
                     "failed_at": datetime.now(timezone.utc).isoformat(),
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "submitted_before_failure": submitted,
                 }
             )
             temporary.write_text(json.dumps(failed, indent=2, sort_keys=True) + "\n")
             os.replace(temporary, intent)
             raise
 
+        self.save_state(history)
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2,
             "resubmitted_at": datetime.now(timezone.utc).isoformat(),
             "production": str(self.production),
             "era": str(self.era),
             "tree": str(self.tree),
             "jobs_dir": str(jobs_dir),
+            "site": str(self.site),
             "outstanding_before": outstanding,
             "totals_before": classified["totals"],
-            "command_output": str(transcript),
+            "causes_before": classified["causes"],
+            "submitted": submitted,
+            "skipped": [
+                {"job": f"{item['job']}:{item['proc']}", "cause": item["cause"],
+                 "reason": item["reason"]}
+                for item in skipped
+            ],
             # Deliberately no "after" counts. The resubmitted jobs have only just
             # been queued, so any success claim here would be about submission
             # again rather than about the jobs running. Rerun the status task.
@@ -1340,6 +1463,6 @@ class DitauEffectiveEventResubmission(law.Task):
         completed["resubmission_receipt"] = self.output().path
         intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
         print(
-            f"[resubmit] {self.tree}: {outstanding} outstanding job(s) resubmitted. "
-            "Rerun DitauEffectiveEventStatus to see whether they ran."
+            f"[resubmit] {self.tree}: {len(submitted)} job(s) resubmitted, "
+            f"{len(skipped)} skipped. Rerun DitauEffectiveEventStatus to see whether they ran."
         )
