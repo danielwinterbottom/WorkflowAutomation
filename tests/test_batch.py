@@ -90,6 +90,32 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(second.request_memory_mb, first.request_memory_mb)
         self.assertGreater(second.request_cpus, first.request_cpus)
 
+    def test_a_timeout_tries_medium_before_long(self):
+        # Escalation advances one rung at a time, so a job that overruns three
+        # hours is offered ten before anything asks the farm for forty-eight.
+        first = self.site.next_step(WALLTIME, None)
+        medium = self.site.next_step(WALLTIME, first)
+        self.assertEqual(medium.runtime_seconds, 35999)
+        self.assertEqual(
+            [c.name for c in self.site.classes_for(medium.runtime_seconds)],
+            ["medium", "long"],
+        )
+
+        long_run = self.site.next_step(WALLTIME, medium)
+        self.assertEqual(long_run.runtime_seconds, 172799)
+        self.assertEqual([c.name for c in self.site.classes_for(long_run.runtime_seconds)], ["long"])
+
+    def test_escalation_never_skips_a_rung(self):
+        current = self.site.next_step(WALLTIME, None)
+        seen = [current.runtime_seconds]
+        while True:
+            try:
+                current = self.site.next_step(WALLTIME, current)
+            except BootstrapError:
+                break
+            seen.append(current.runtime_seconds)
+        self.assertEqual(seen, list(self.site.runtime_ladder))
+
     def test_infrastructure_failures_retry_unchanged(self):
         first = self.site.next_step(WALLTIME, None)
         again = self.site.next_step(INFRASTRUCTURE, first)
