@@ -435,6 +435,53 @@ class DitauEffectiveEventStatusTests(unittest.TestCase):
             self.assertEqual(len(result["failures"]), 1)
             self.assertEqual(result["failures"][0]["proc"], 1)
 
+    def test_records_why_each_job_failed(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build_jobs_dir(root)
+            # proc 1 already exists as a failure with no explanation; give it the
+            # real thing this farm writes for a wall clock kill.
+            (jobs / "AN-Sample.100.log").write_text(
+                "000 (100.001.000) Job submitted\n...\n"
+                "012 (100.001.000) Job was held.\n"
+                "\tJob held by SYSTEM_PERIODIC_HOLD due to wall time exceeded.\n...\n"
+            )
+            result = self.status_task(root).classify(jobs)
+
+            self.assertEqual(result["causes"], {"walltime": 1})
+            failure = result["failures"][0]
+            self.assertEqual(failure["cause"], "walltime")
+            self.assertTrue(failure["retryable"])
+
+    def test_an_application_failure_is_marked_not_retryable(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build_jobs_dir(root)
+            (jobs / "AN-Sample.100.1.err").write_text(
+                "Traceback (most recent call last):\nModuleNotFoundError: No module named 'numpy'\n"
+            )
+            result = self.status_task(root).classify(jobs)
+
+            self.assertEqual(result["causes"], {"application": 1})
+            self.assertFalse(result["failures"][0]["retryable"])
+
+    def test_one_proc_hold_is_not_attributed_to_its_siblings(self):
+        # Condor writes one log per cluster, so reading the whole file would make
+        # every proc in it look held.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            jobs = self.build_jobs_dir(root)
+            (jobs / "AN-Sample.100.2.out").write_text("started, no marker\n")
+            (jobs / "AN-Sample.100.log").write_text(
+                "012 (100.002.000) Job was held.\n"
+                "\tJob held by SYSTEM_PERIODIC_HOLD due to wall time exceeded.\n...\n"
+            )
+            result = self.status_task(root).classify(jobs)
+
+            by_proc = {item["proc"]: item["cause"] for item in result["failures"]}
+            self.assertEqual(by_proc[2], "walltime")
+            self.assertNotEqual(by_proc[1], "walltime")
+
     def test_uses_the_most_recent_attempt(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

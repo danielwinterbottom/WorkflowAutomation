@@ -12,6 +12,7 @@ from pathlib import Path
 import law
 import luigi
 
+from workflow_automation import batch
 from workflow_automation.cli import (
     DEFAULT_CONFIG,
     DEFAULT_WORKSPACE,
@@ -1068,14 +1069,57 @@ class DitauEffectiveEventStatus(law.Task):
                     counts["completed"] += 1
                 else:
                     counts["failed"] += 1
-                    failures.append({"job": job_id, "proc": index, "output": str(candidates[-1])})
+                    failures.append(self.diagnose(jobs_dir, job_id, index, candidates[-1]))
             datasets[job_id] = counts
 
         totals = {key: 0 for key in ("expected", "completed", "failed", "pending")}
         for counts in datasets.values():
             for key in totals:
                 totals[key] += counts[key]
-        return {"datasets": datasets, "totals": totals, "failures": failures}
+        causes: dict[str, int] = {}
+        for failure in failures:
+            causes[failure["cause"]] = causes.get(failure["cause"], 0) + 1
+        return {
+            "datasets": datasets,
+            "totals": totals,
+            "causes": causes,
+            "failures": failures,
+        }
+
+    @staticmethod
+    def read_text(path: Path, limit: int = 256_000) -> str:
+        try:
+            with path.open("rb") as stream:
+                try:
+                    stream.seek(-limit, os.SEEK_END)
+                except OSError:
+                    stream.seek(0)
+                return stream.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def diagnose(self, jobs_dir: Path, job_id: str, index: int, output: Path) -> dict[str, object]:
+        """Record not just that a job failed, but why, so a retry can be reasoned about."""
+        # <job>.<cluster>.<proc>.out, and the cluster's log covers every proc in it.
+        parts = output.name.split(".")
+        cluster = parts[-3] if len(parts) >= 4 else ""
+        error = jobs_dir / f"{job_id}.{cluster}.{index}.err"
+        log = jobs_dir / f"{job_id}.{cluster}.log"
+        events = batch.events_for_proc(self.read_text(log), index) if log.is_file() else ""
+        cause = batch.classify_failure(
+            log_text=events,
+            stderr_text=self.read_text(error) if error.is_file() else "",
+            stdout_text=self.read_text(output),
+        )
+        return {
+            "job": job_id,
+            "proc": index,
+            "cause": cause,
+            "retryable": cause in batch.RETRYABLE,
+            "output": str(output),
+            "error": str(error) if error.is_file() else None,
+            "log": str(log) if log.is_file() else None,
+        }
 
     def run(self) -> None:
         jobs_dir = self.jobs_directory()
@@ -1091,6 +1135,7 @@ class DitauEffectiveEventStatus(law.Task):
             "jobs_dir": str(jobs_dir),
             "queued_now": queued,
             "totals": totals,
+            "causes": classified["causes"],
             "datasets": classified["datasets"],
             "failures": classified["failures"],
         }
@@ -1098,10 +1143,14 @@ class DitauEffectiveEventStatus(law.Task):
             json.dumps(report, indent=2, sort_keys=True) + "\n", formatter="text"
         )
         pending = totals["pending"]
+        summary = ", ".join(
+            f"{count} {cause}" for cause, count in sorted(classified["causes"].items())
+        )
         print(
             f"[status] {self.tree}: {totals['completed']}/{totals['expected']} completed, "
             f"{totals['failed']} failed, {pending} pending"
             + (f", {queued} still queued" if queued is not None else ", queue unreadable")
+            + (f" | causes: {summary}" if summary else "")
         )
 
 

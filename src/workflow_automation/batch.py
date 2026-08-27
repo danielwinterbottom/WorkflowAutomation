@@ -233,6 +233,28 @@ _HELD_PATTERN = re.compile(
 )
 
 
+def events_for_proc(log_text: str, proc: int) -> str:
+    """Extract one proc's events from a shared cluster log.
+
+    Condor writes a single log per cluster covering every proc in it, so reading
+    the whole file would attribute one proc's hold to all of its siblings. Each
+    event begins `NNN (cluster.proc.subproc)` and continues, indented, until the
+    terminating `...` line.
+    """
+    wanted = re.compile(rf"^\d{{3}} \(\d+\.{proc:03d}\.\d+\)")
+    header = re.compile(r"^\d{3} \(\d+\.\d+\.\d+\)")
+    kept: list[str] = []
+    keeping = False
+    for line in log_text.splitlines():
+        if header.match(line):
+            keeping = bool(wanted.match(line))
+        if keeping:
+            kept.append(line)
+        if line.strip() == "..." and keeping:
+            keeping = False
+    return "\n".join(kept)
+
+
 def classify_failure(log_text: str = "", stderr_text: str = "", stdout_text: str = "") -> str:
     """Say why a job did not finish, from what Condor and the job itself recorded.
 
