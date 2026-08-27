@@ -1103,3 +1103,194 @@ class DitauEffectiveEventStatus(law.Task):
             f"{totals['failed']} failed, {pending} pending"
             + (f", {queued} still queued" if queued is not None else ", queue unreadable")
         )
+
+
+class DitauEffectiveEventResubmission(law.Task):
+    """Resubmit only the jobs that did not finish, with explicit operator opt-in.
+
+    Completeness here is defined by the jobs themselves, not by having run a
+    command. The task is complete when the status report shows nothing left to
+    fix, so a resubmission that silently achieved nothing cannot look like
+    success the way a receipt-based check would.
+    """
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    tree = luigi.ChoiceParameter(choices=("Events", "EventsNotSelected"))
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauEffectiveEventStatus:
+        # Status never reports itself complete, so this always re-probes the jobs
+        # before anything is resubmitted.
+        return DitauEffectiveEventStatus(
+            production=self.production,
+            era=self.era,
+            tree=self.tree,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def status(self) -> DitauEffectiveEventStatus:
+        return self.requires()
+
+    def state_dir(self) -> Path:
+        return self.status().state_dir()
+
+    def intent_path(self) -> Path:
+        return self.state_dir() / "resubmission-intents" / f"{self.tree}.json"
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(
+            str(self.state_dir() / "resubmission-receipts" / f"{self.tree}.json")
+        )
+
+    def live_state(self) -> tuple[Path, dict[str, object]] | None:
+        """Classify the jobs as they are now, rather than trusting a written report.
+
+        A status report on disk describes whatever was true when it was written.
+        Deciding completeness from it would let a stale artifact stand in for the
+        jobs themselves, which is exactly how a submitted-but-dead fleet once
+        looked healthy. Pay the directory scan instead.
+        """
+        probe = self.status()
+        try:
+            jobs_dir = probe.jobs_directory()
+        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
+            return None
+        if not jobs_dir.is_dir():
+            return None
+        return jobs_dir, probe.classify(jobs_dir)
+
+    @staticmethod
+    def outstanding(classified: dict[str, object]) -> int:
+        totals = classified["totals"]
+        return int(totals["failed"]) + int(totals["pending"])
+
+    def complete(self) -> bool:
+        state = self.live_state()
+        if state is None:
+            return False
+        return self.outstanding(state[1]) == 0
+
+    def plan_command(self) -> dict[str, object]:
+        plan_path = self.state_dir() / "plan.json"
+        if not plan_path.is_file():
+            raise BootstrapError(f"effective-event plan is missing: {plan_path}")
+        matches = [
+            item
+            for item in json.loads(plan_path.read_text())["commands"]
+            if item["tree"] == str(self.tree)
+        ]
+        if len(matches) != 1:
+            raise BootstrapError(f"plan has no unique command for tree {self.tree}")
+        return matches[0]
+
+    def run(self) -> None:
+        if not self.allow_submission:
+            raise BootstrapError(
+                "resubmission is disabled; review the status report and rerun with "
+                "--allow-submission only if the failed jobs should be resubmitted"
+            )
+        state = self.live_state()
+        if state is None:
+            raise BootstrapError(
+                "cannot inspect the jobs for this tree; a receipted submission and its "
+                "job directory must exist before anything can be resubmitted"
+            )
+        jobs_dir, classified = state
+        outstanding = self.outstanding(classified)
+        if outstanding == 0:
+            raise BootstrapError("nothing to resubmit; no job is failed or pending")
+
+        intent = self.intent_path()
+        if intent.exists():
+            raise BootstrapError(
+                f"resubmission intent already exists at {intent}; inspect Condor and the "
+                "status report, then reconcile it manually before any retry"
+            )
+
+        command = self.plan_command()
+        checkout = Path(command["cwd"])
+        environment_bin = command.get("environment_bin")
+        script = checkout / "scripts/ditau/processing/resubmit_jobs_condor.py"
+        if not script.is_file():
+            raise BootstrapError(f"resubmission script is missing: {script}")
+        argv = [str(Path(str(environment_bin)) / "python"), str(script), str(jobs_dir)]
+
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        temporary = intent.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "tree": str(self.tree),
+                    "jobs_dir": str(jobs_dir),
+                    "outstanding_before": outstanding,
+                    "totals_before": classified["totals"],
+                    "status": "started",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, intent)
+
+        try:
+            # The generated submit files use `getenv = True`, so the resubmitted
+            # jobs inherit this PATH exactly as the original submission did.
+            output = run_program(
+                argv,
+                cwd=checkout,
+                env=DitauEffectiveEventSubmission.command_environment(command),
+            )
+            transcript = intent.with_name(f"{self.tree}.command-output.log")
+            transcript.write_text(output + "\n")
+        except Exception as exc:
+            failed = json.loads(intent.read_text())
+            failed.update(
+                {
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            temporary.write_text(json.dumps(failed, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, intent)
+            raise
+
+        receipt = {
+            "schema_version": 1,
+            "resubmitted_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "tree": str(self.tree),
+            "jobs_dir": str(jobs_dir),
+            "outstanding_before": outstanding,
+            "totals_before": classified["totals"],
+            "command_output": str(transcript),
+            # Deliberately no "after" counts. The resubmitted jobs have only just
+            # been queued, so any success claim here would be about submission
+            # again rather than about the jobs running. Rerun the status task.
+        }
+        self.output().dump(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+        completed = json.loads(intent.read_text())
+        completed["status"] = "completed"
+        completed["resubmission_receipt"] = self.output().path
+        intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
+        print(
+            f"[resubmit] {self.tree}: {outstanding} outstanding job(s) resubmitted. "
+            "Rerun DitauEffectiveEventStatus to see whether they ran."
+        )

@@ -10,6 +10,7 @@ from workflow_automation.tasks import (
     DitauInputPreparation,
     DitauEffectiveEventPlan,
     DitauEffectiveEventReadiness,
+    DitauEffectiveEventResubmission,
     DitauEffectiveEventStatus,
     DitauEffectiveEventSubmission,
     DitauProductionPlan,
@@ -474,6 +475,109 @@ class DitauEffectiveEventStatusTests(unittest.TestCase):
     def test_queue_count_is_unknown_when_condor_is_absent(self):
         with patch("workflow_automation.tasks.shutil.which", return_value=None):
             self.assertIsNone(DitauEffectiveEventStatus.queued_job_count(Path("/x")))
+
+
+class DitauEffectiveEventResubmissionTests(unittest.TestCase):
+    def task(self, root: Path, allow=False) -> DitauEffectiveEventResubmission:
+        return DitauEffectiveEventResubmission(
+            production="test",
+            era="Run3_2022",
+            tree="Events",
+            allow_submission=allow,
+            workspace=str(root),
+        )
+
+    MARKER = "Processing 100% \u2501\u2501 3/3"
+
+    def write_jobs(self, root: Path, failed=0, pending=0, total=3) -> Path:
+        """Build a real job directory, plus the receipt and record pointing at it."""
+        jobs = root / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "AN-Sample.sub").write_text(f"executable = x\nqueue {total}\n")
+        for index in range(total):
+            if index < total - failed - pending:
+                (jobs / f"AN-Sample.1.{index}.out").write_text(f"ok\n{self.MARKER}\n")
+            elif index < total - pending:
+                (jobs / f"AN-Sample.1.{index}.out").write_text("died early\n")
+            # anything left has no .out at all, so it counts as pending
+
+        state = self.task(root).state_dir()
+        record = state / "submission-records" / "rec.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"jobs_dir": str(jobs)}))
+        receipt = state / "submission-receipts" / "Events.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({"submission_record": str(record)}))
+        return jobs
+
+    def test_complete_means_no_jobs_left_to_fix(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, failed=0, pending=0)
+            self.assertTrue(self.task(root).complete())
+
+    def test_incomplete_while_jobs_are_still_outstanding(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            # Having resubmitted once must not count as complete: what matters is
+            # whether the jobs are done, not whether a command was run.
+            self.write_jobs(root, failed=2)
+            task = self.task(root)
+            receipt = Path(task.output().path)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text("{}")
+            self.assertFalse(task.complete())
+
+    def test_pending_jobs_also_count_as_outstanding(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, pending=2)
+            self.assertFalse(self.task(root).complete())
+
+    def test_refuses_without_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, failed=1)
+            with self.assertRaisesRegex(BootstrapError, "resubmission is disabled"):
+                self.task(root).run()
+
+    def test_refuses_when_nothing_failed(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, failed=0, pending=0)
+            with self.assertRaisesRegex(BootstrapError, "nothing to resubmit"):
+                self.task(root, allow=True).run()
+
+    def test_a_stale_status_report_cannot_declare_completeness(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, failed=1)
+            # A report written when everything was fine must not outvote the jobs.
+            task = self.task(root)
+            report = Path(task.status().output().path)
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(
+                json.dumps(
+                    {
+                        "jobs_dir": str(root / "jobs"),
+                        "totals": {
+                            "expected": 3, "completed": 3, "failed": 0, "pending": 0
+                        },
+                    }
+                )
+            )
+            self.assertFalse(task.complete())
+
+    def test_an_unresolved_intent_blocks_retry(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_jobs(root, failed=1)
+            task = self.task(root, allow=True)
+            intent = task.intent_path()
+            intent.parent.mkdir(parents=True, exist_ok=True)
+            intent.write_text('{"status": "failed"}')
+            with self.assertRaisesRegex(BootstrapError, "intent already exists"):
+                task.run()
 
 
 class DitauProductionPlanTests(unittest.TestCase):
