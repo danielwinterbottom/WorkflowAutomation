@@ -5,6 +5,8 @@ from pathlib import Path
 
 from workflow_automation.batch import (
     APPLICATION,
+    ATTEMPTS,
+    STALLED,
     UNKNOWN,
     Demand,
     INFRASTRUCTURE,
@@ -126,6 +128,41 @@ class FailureClassificationTests(unittest.TestCase):
         """
         log = (Path(__file__).parent / "fixtures" / "condor-walltime-hold.log").read_text()
         self.assertEqual(classify_failure(log_text=log), WALLTIME)
+
+    def test_run_count_exhaustion_is_not_retried(self):
+        # Observed on 309 held jobs on this farm. The schedd holds anything that
+        # has started more than three times, so resubmitting it again is asking
+        # for the same hold rather than a different outcome.
+        log = "Job held by SYSTEM_PERIODIC_HOLD due to exceeding max run count."
+        cause = classify_failure(log_text=log)
+        self.assertEqual(cause, ATTEMPTS)
+        with self.assertRaisesRegex(BootstrapError, "not resubmittable"):
+            load_site(SITE, "imperial").next_step(cause, None)
+
+    def test_a_stalled_job_is_surfaced_not_retried(self):
+        # This schedd holds a job that has run over an hour below 2% CPU. It was
+        # alive and doing nothing, which running it again will not diagnose.
+        log = (
+            "The system macro SYSTEM_PERIODIC_HOLD expression '(ifThenElse(JobStatus == 2, "
+            "time() - JobCurrentStartExecutingDate, 0) > MaxRuntime) || (JobRunCount > 3) || "
+            "((((RemoteSysCpu + RemoteUserCpu) / RequestCpus) / (time() - "
+            "JobCurrentStartExecutingDate)) < 0.02)' evaluated to TRUE"
+        )
+        self.assertNotIn(classify_failure(log_text=log), ("walltime", "memory", "incomplete"))
+
+    def test_memory_is_read_from_the_job_because_this_farm_never_holds_for_it(self):
+        # The schedd's hold policy has no memory condition, so an over-large job
+        # is killed inside its slot and only its own output shows it.
+        self.assertEqual(classify_failure(stderr_text="MemoryError"), MEMORY)
+        self.assertEqual(classify_failure(stderr_text="terminate called: std::bad_alloc"), MEMORY)
+        self.assertEqual(classify_failure(stdout_text="allocating\nKilled\n"), MEMORY)
+
+    def test_a_transfer_failure_is_infrastructure(self):
+        log = (
+            "Transfer input files failure at access point htcmaster00 while sending files to "
+            "execution point slot1_2@hep. Details: 1 total failures"
+        )
+        self.assertEqual(classify_failure(log_text=log), INFRASTRUCTURE)
 
     def test_a_hold_we_cannot_read_is_not_blindly_retried(self):
         # Holds are how this farm enforces limits. An unrecognised one is a limit

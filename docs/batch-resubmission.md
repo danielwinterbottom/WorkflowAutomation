@@ -24,6 +24,44 @@ Resource limits are checked before application errors on purpose. A job killed f
 memory often dies part-way through unwinding a traceback, and reading that traceback as a code fault
 would stop us retrying something a larger slot would finish.
 
+Two further causes are recognised and deliberately not retried:
+
+| Cause | Recognised from | Why not retried |
+| --- | --- | --- |
+| `attempts` | "exceeding max run count" | the farm has already started it three times |
+| `stalled` | held for running over an hour below 2% CPU | it was alive and doing nothing; running it again will not explain why |
+
+## What this farm actually does, and how we know
+
+The classifier is written against observed behaviour, not against what the manual suggests. Two
+things were established directly and both contradicted earlier guesses.
+
+Submitting one job with a sixty second limit and a ten minute sleep showed that a wall clock kill
+arrives as a **hold**, reading `Job held by SYSTEM_PERIODIC_HOLD due to wall time exceeded`. Neither
+`MaxRuntime` nor the word "maximum" appears, so the patterns originally written for it never matched.
+That log is kept as a fixture in `tests/fixtures/`.
+
+Reading the schedd's own policy with `condor_config_val -schedd SYSTEM_PERIODIC_HOLD` gives the
+authoritative list of what this site holds jobs for:
+
+```text
+(runtime > MaxRuntime)                          -> "wall time exceeded"
+|| (JobRunCount > 3)                            -> "exceeding max run count"
+|| (runtime > 3600 && cpu efficiency < 0.02)    -> no custom message
+```
+
+**There is no memory condition.** This farm never holds a job for exceeding its memory request, so
+a memory failure can only be recognised from the job's own output: `MemoryError`, `std::bad_alloc`,
+a bare `Killed`, or an allocation failure. Anything looking for memory in a hold reason would wait
+forever.
+
+The run count limit also bounds resubmission from the outside: a job the schedd has started more
+than three times is held regardless of what we would like to do with it.
+
+A hold whose reason matches none of the known causes is reported as `unknown` rather than treated as
+retryable, on the grounds that it is a site limit we have not learned to read, and retrying into it
+would meet it again.
+
 ## Only observed failures raise what a job is given
 
 A job's first slot provides whatever that node class happens to offer. That is not a measurement of

@@ -23,10 +23,15 @@ MEMORY = "memory"
 INFRASTRUCTURE = "infrastructure"
 APPLICATION = "application"
 INCOMPLETE = "incomplete"
+ATTEMPTS = "attempts"
+STALLED = "stalled"
 UNKNOWN = "unknown"
 
-# Causes worth resubmitting, and how. An application error is absent on purpose:
-# the code or configuration is wrong, so a retry produces the same failure.
+# Causes worth resubmitting. Absent on purpose: an application error, because the
+# code or configuration is wrong and a retry reproduces it exactly; a job that has
+# exhausted the site's run-count limit, because the farm has already tried it
+# repeatedly; and a stalled job, which was alive but doing nothing and needs
+# looking at rather than running again.
 RETRYABLE = {WALLTIME, MEMORY, INFRASTRUCTURE, INCOMPLETE}
 
 
@@ -195,6 +200,9 @@ _MEMORY_PATTERNS = (
     re.compile(r"out\s+of\s+memory", re.IGNORECASE),
     re.compile(r"\bOOM\b"),
     re.compile(r"MemoryError"),
+    re.compile(r"Killed\s*$", re.MULTILINE),
+    re.compile(r"std::bad_alloc"),
+    re.compile(r"Cannot allocate memory", re.IGNORECASE),
 )
 _APPLICATION_PATTERNS = (
     re.compile(r"^Traceback \(most recent call last\)", re.MULTILINE),
@@ -208,38 +216,57 @@ _INFRASTRUCTURE_PATTERNS = (
     re.compile(r"failed to execute", re.IGNORECASE),
     re.compile(r"transfer\s+.*fail", re.IGNORECASE),
 )
-_HELD_PATTERN = re.compile(r"Job was held|Job held by", re.IGNORECASE)
+# This schedd holds a job when it exceeds MaxRuntime, when it has started more
+# than three times, or when it has run over an hour below 2% CPU. Notably there
+# is no memory condition, so a job that overruns its memory is never held for it:
+# it is killed inside the slot and says so in its own output instead.
+_ATTEMPTS_PATTERNS = (
+    re.compile(r"exceeding\s+max\s+run\s+count", re.IGNORECASE),
+    re.compile(r"JobRunCount", re.IGNORECASE),
+)
+_STALLED_PATTERNS = (
+    re.compile(r"RemoteSysCpu.*RemoteUserCpu", re.IGNORECASE),
+    re.compile(r"low\s+cpu\s+efficiency", re.IGNORECASE),
+)
+_HELD_PATTERN = re.compile(
+    r"Job was held|Job held by|SYSTEM_PERIODIC_HOLD|OnExitHold", re.IGNORECASE
+)
 
 
 def classify_failure(log_text: str = "", stderr_text: str = "", stdout_text: str = "") -> str:
     """Say why a job did not finish, from what Condor and the job itself recorded.
 
-    Resource limits are read before application errors: a job killed for
-    exceeding its memory often dies mid-traceback, and reading that traceback as
-    a code fault would stop us retrying something a larger slot would complete.
-
-    A hold whose reason is not recognised returns UNKNOWN rather than something
-    retryable. Holds are how this farm enforces its limits, so an unrecognised
-    one is a limit we have not learned to read, and retrying it unchanged would
-    simply hit the same limit again.
+    The order reflects where each cause is actually observable at this site.
+    Condor's hold reasons carry wall clock, run count and stalls. Memory is not
+    among them: the schedd has no memory condition, so an over-large job is
+    killed inside its slot and only its own output shows it.
     """
     condor = log_text or ""
-    if any(pattern.search(condor) for pattern in _MEMORY_PATTERNS):
-        return MEMORY
+    combined = f"{stderr_text}\n{stdout_text}"
+
+    if any(pattern.search(condor) for pattern in _ATTEMPTS_PATTERNS):
+        return ATTEMPTS
     if any(pattern.search(condor) for pattern in _WALLTIME_PATTERNS):
         return WALLTIME
+    if any(pattern.search(condor) for pattern in _MEMORY_PATTERNS):
+        return MEMORY
+    if any(pattern.search(condor) for pattern in _STALLED_PATTERNS):
+        return STALLED
+    if any(pattern.search(condor) for pattern in _INFRASTRUCTURE_PATTERNS):
+        return INFRASTRUCTURE
     if _HELD_PATTERN.search(condor):
+        # A hold we cannot read is a site limit we have not learned. Retrying it
+        # unchanged would simply meet the same limit again.
         return UNKNOWN
-    combined = f"{stderr_text}\n{stdout_text}"
+
+    # Nothing in Condor's account explains it, so ask the job. Memory is checked
+    # before application errors because an out-of-memory kill often lands
+    # mid-traceback, and reading that as a code fault would stop us retrying
+    # something a larger slot would finish.
     if any(pattern.search(combined) for pattern in _MEMORY_PATTERNS):
         return MEMORY
     if any(pattern.search(combined) for pattern in _APPLICATION_PATTERNS):
         return APPLICATION
-    if any(pattern.search(condor) for pattern in _INFRASTRUCTURE_PATTERNS):
-        return INFRASTRUCTURE
     if condor.strip() or combined.strip():
-        # It started and produced something, but never reached its completion
-        # marker and gave no reason. Retrying once is reasonable; the attempt
-        # cap is what stops this becoming a loop.
         return INCOMPLETE
     return UNKNOWN
