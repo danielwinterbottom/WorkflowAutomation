@@ -88,7 +88,11 @@ class Site:
         if cpus > self.max_cpus_per_job:
             raise BootstrapError(
                 f"{memory_mb}MB within {runtime_seconds}s needs {cpus} cores at site "
-                f"{self.name!r}, above the configured maximum of {self.max_cpus_per_job}"
+                f"{self.name!r}, above the configured maximum of {self.max_cpus_per_job}. "
+                "This is a deliberate stop rather than a farm limit: needing more cores "
+                "means the memory per job is too high, and the work should be split "
+                "differently instead. Raise max_cpus_per_job in the batch configuration "
+                "if you would rather trade that away."
             )
         return Resources(
             request_cpus=cpus, request_memory_mb=memory_mb, runtime_seconds=runtime_seconds

@@ -46,6 +46,22 @@ class ResourceResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(BootstrapError, "above the configured maximum"):
             self.site.resolve(172799, 999000)
 
+    def test_wanting_both_more_time_and_more_memory_stops_rather_than_growing(self):
+        # 16GB on 4GB slots is four cores. Past two, the answer is not a bigger
+        # slot but a different split, so this must stop rather than escalate.
+        with self.assertRaises(BootstrapError) as caught:
+            self.site.resolve(35999, 16000)
+        self.assertIn("split", str(caught.exception))
+
+    def test_the_stop_says_the_limit_is_a_choice_not_a_farm_constraint(self):
+        with self.assertRaises(BootstrapError) as caught:
+            self.site.resolve(35999, 16000)
+        self.assertIn("max_cpus_per_job", str(caught.exception))
+
+    def test_two_cores_remain_available(self):
+        self.assertEqual(self.site.resolve(35999, 8000).request_cpus, 2)
+        self.assertEqual(self.site.resolve(10799, 24000).request_cpus, 2)
+
     def test_submit_lines_use_the_site_runtime_attribute(self):
         lines = self.site.resolve(10799, 8000).submit_lines(self.site.runtime_attribute)
         self.assertIn("+MaxRuntime = 10799", lines)

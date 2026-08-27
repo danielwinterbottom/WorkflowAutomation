@@ -25,7 +25,7 @@
           "memory_per_slot_mb": 4000
         }
       ],
-      "max_cpus_per_job": 8,
+      "max_cpus_per_job": 2,
       "escalation": {
         "runtime_seconds": [
           10799,
@@ -38,7 +38,8 @@
           24000
         ],
         "max_attempts": 3
-      }
+      },
+      "max_cpus_per_job_comment": "Not a site limit; the farm allows more. Needing more than two cores means the memory per job is too high, and the work should be split differently rather than given a bigger slot. Raise this deliberately if you want to trade that away."
     }
   }
 }
