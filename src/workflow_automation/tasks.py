@@ -12,7 +12,7 @@ from pathlib import Path
 import law
 import luigi
 
-from workflow_automation import batch
+from workflow_automation import batch, provenance
 from workflow_automation.cli import (
     DEFAULT_CONFIG,
     DEFAULT_WORKSPACE,
@@ -1466,3 +1466,242 @@ class DitauEffectiveEventResubmission(law.Task):
             f"[resubmit] {self.tree}: {len(submitted)} job(s) resubmitted, "
             f"{len(skipped)} skipped. Rerun DitauEffectiveEventStatus to see whether they ran."
         )
+
+
+class DitauDerivedArtefact(law.Task):
+    """Base for the committed files derived from the effective-event counts.
+
+    These are expensive to produce and are kept in the repository once made, so
+    the question each subclass answers is not "have I run" but "is what is
+    already here still derived from the inputs I would use". When it is, nothing
+    runs, and in particular the thousands of effective-event jobs behind it do
+    not need to be submitted at all.
+    """
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    allow_overwrite = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    #: file produced under scripts/ditau/config/<era>/
+    artefact_name: str = ""
+
+    def checkout(self) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        return Path(self.workspace).expanduser().resolve() / repositories["HiggsDNA"].directory
+
+    def environment_python(self) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        base = (
+            Path(self.environment_root).expanduser().resolve()
+            if self.environment_root
+            else Path(self.workspace).expanduser().resolve() / ".environments"
+        )
+        return base / repositories["HiggsDNA"].directory / "bin/python"
+
+    def config_dir(self) -> Path:
+        return self.checkout() / "scripts/ditau/config" / str(self.era)
+
+    def artefact(self) -> Path:
+        return self.config_dir() / self.artefact_name
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.artefact()))
+
+    def sources(self) -> dict[str, Path]:
+        raise NotImplementedError
+
+    def expected_provenance(self) -> dict[str, object]:
+        return provenance.describe(
+            self.sources(),
+            {
+                "era": str(self.era),
+                "production": str(self.production),
+                "higgsdna_commit": run_git(["rev-parse", "HEAD"], cwd=self.checkout()),
+            },
+        )
+
+    def complete(self) -> bool:
+        try:
+            return provenance.matches(self.artefact(), self.expected_provenance())
+        except (BootstrapError, OSError):
+            return False
+
+    def command(self) -> list[str]:
+        raise NotImplementedError
+
+    def run(self) -> None:
+        artefact = self.artefact()
+        provenance.guard_overwrite(artefact, bool(self.allow_overwrite))
+        expected = self.expected_provenance()
+        environment = dict(os.environ)
+        bin_dir = str(self.environment_python().parent)
+        entries = [item for item in environment.get("PATH", "").split(os.pathsep) if item]
+        environment["PATH"] = os.pathsep.join([bin_dir, *entries])
+        run_program(self.command(), cwd=self.checkout(), env=environment)
+        if not artefact.is_file():
+            raise BootstrapError(f"{self.command()[1]} did not produce {artefact}")
+        provenance.stamp(artefact, expected)
+        print(f"[derived] {self.era}: wrote {artefact}")
+
+
+class DitauEffectiveEventCounts(DitauDerivedArtefact):
+    """Step 3: sum the per-file effective-event counts into one file per sample.
+
+    This is the boundary where the batch jobs stop being needed. If the counts
+    already present were derived from the sample list and manifest still in use,
+    nothing here runs and neither tree has to be submitted.
+    """
+
+    artefact_name = "effective_events.yaml"
+
+    def production_config(self) -> dict[str, object]:
+        data = json.loads(Path(self.productions_config).read_text())
+        try:
+            return data["productions"][str(self.production)]
+        except KeyError as exc:
+            raise BootstrapError(f"unknown production {self.production!r}") from exc
+
+    def sample_manifest(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+            / "sample-manifests"
+            / str(self.era)
+            / "samples"
+            / "samples_MC.json"
+        )
+
+    def sources(self) -> dict[str, Path]:
+        # What the counts actually depend on: which samples were asked for, and
+        # which files were found for them. Not the analysis configuration, which
+        # does not affect a count of generator weights.
+        return {
+            "samples_yaml": self.checkout()
+            / f"scripts/ditau/pre_processing/samples_{self.era}.yaml",
+            "sample_manifest": self.sample_manifest(),
+        }
+
+    def effective_output(self) -> Path:
+        output = self.production_config().get("effective_output")
+        if not output:
+            raise BootstrapError(
+                f"production {self.production!r} has no effective_output configured"
+            )
+        return Path(str(output))
+
+    def run(self) -> None:
+        # The counts are summed from what the jobs wrote, so refuse clearly if
+        # they were never run rather than producing an empty or partial file.
+        produced = self.checkout() / self.effective_output() / str(self.era)
+        if not produced.is_dir() or not any(produced.iterdir()):
+            raise BootstrapError(
+                f"no effective-event output under {produced}. Submit both trees first with "
+                "DitauEffectiveEventSubmission, or restore the counts file that already "
+                "carried valid provenance"
+            )
+        super().run()
+
+    def command(self) -> list[str]:
+        return [
+            str(self.environment_python()),
+            "scripts/ditau/processing/getEffectiveEvents.py",
+            "--directory",
+            str(self.effective_output()),
+            "--year",
+            str(self.era),
+        ]
+
+
+class DitauStitching(DitauDerivedArtefact):
+    """Step 4: combine cross sections with the effective-event counts."""
+
+    artefact_name = "Stitching.yaml"
+
+    def requires(self) -> DitauEffectiveEventCounts:
+        return DitauEffectiveEventCounts(
+            production=self.production,
+            era=self.era,
+            allow_overwrite=self.allow_overwrite,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def sources(self) -> dict[str, Path]:
+        return {
+            "cross_sections": self.checkout() / "scripts/ditau/config/cross_sections.yaml",
+            "effective_events": self.config_dir() / "effective_events.yaml",
+        }
+
+    def command(self) -> list[str]:
+        return [
+            str(self.environment_python()),
+            "scripts/ditau/processing/getStitchingInfo.py",
+            "--year",
+            str(self.era),
+        ]
+
+
+class DitauParams(DitauDerivedArtefact):
+    """Step 5: assemble luminosity, cross sections and effective events."""
+
+    artefact_name = "params.yaml"
+
+    def requires(self) -> DitauEffectiveEventCounts:
+        return DitauEffectiveEventCounts(
+            production=self.production,
+            era=self.era,
+            allow_overwrite=self.allow_overwrite,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def sources(self) -> dict[str, Path]:
+        return {
+            "samples_yaml": self.checkout()
+            / f"scripts/ditau/pre_processing/samples_{self.era}.yaml",
+            "cross_sections": self.checkout() / "scripts/ditau/config/cross_sections.yaml",
+            "effective_events": self.config_dir() / "effective_events.yaml",
+            "filter_efficiencies": self.config_dir() / "filter_efficiencies.yaml",
+        }
+
+    def command(self) -> list[str]:
+        return [
+            str(self.environment_python()),
+            "scripts/ditau/processing/getParams.py",
+            "--year",
+            str(self.era),
+        ]
+
+
+class DitauStitchingAndParams(law.WrapperTask):
+    """Both derived configuration files for one era."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    allow_overwrite = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> list[DitauDerivedArtefact]:
+        common = {
+            "production": self.production,
+            "era": self.era,
+            "allow_overwrite": self.allow_overwrite,
+            "config": self.config,
+            "productions_config": self.productions_config,
+            "workspace": self.workspace,
+            "environment_root": self.environment_root,
+        }
+        return [DitauStitching(**common), DitauParams(**common)]
