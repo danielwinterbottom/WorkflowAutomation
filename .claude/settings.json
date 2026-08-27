@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(condor_submit *)",
+      "Bash(condor_rm *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -qE -- \"--allow-submission|condor_submit|condor_rm\" && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"This command can submit or remove HTCondor batch jobs. Confirm before running.\"}}' || true",
+            "timeout": 10,
+            "statusMessage": "Checking for batch submission"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_input.notebook_path // \"\"' | { read -r f; root=\"${CLAUDE_PROJECT_DIR:-/vols/cms/dw515/WorkflowAutomation}\"; case \"$f\" in \"\"|\"$root\"|\"$root\"/*) ;; *) printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"This writes outside the project working tree. Confirm before changing files elsewhere.\"}}' ;; esac; }",
+            "timeout": 10,
+            "statusMessage": "Checking write location"
+          }
+        ]
+      }
+    ]
+  }
+}

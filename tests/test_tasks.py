@@ -356,6 +356,49 @@ class DitauEffectiveEventSubmissionTests(unittest.TestCase):
     def test_command_environment_is_inherited_when_unspecified(self):
         self.assertIsNone(DitauEffectiveEventSubmission.command_environment({}))
 
+    def test_plan_schema_version_changes_the_fingerprint(self):
+        # A plan's inputs can be unchanged while the code that builds its commands
+        # changes. Without the schema version in the fingerprint, the stale plan
+        # keeps looking current and the new commands are never generated.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            productions = root / "productions.json"
+            productions.write_text(
+                json.dumps(
+                    {
+                        "productions": {
+                            "test": {
+                                "eras": ["Run3_2022"],
+                                "effective_output": "output/effective/test",
+                            }
+                        }
+                    }
+                )
+            )
+            task = DitauEffectiveEventPlan(
+                production="test",
+                era="Run3_2022",
+                productions_config=str(productions),
+                workspace=str(root),
+            )
+            receipt = root / "receipt.json"
+            receipt.write_text("{}")
+            analysis = root / "ditau_analysis.json"
+            analysis.write_text("{}")
+
+            with patch.object(task, "checkout", return_value=(None, root)), patch.object(
+                task, "sample_receipt", return_value=receipt
+            ), patch(
+                "workflow_automation.tasks.run_git", return_value="deadbeef"
+            ), patch(
+                "pathlib.Path.read_bytes", autospec=True, side_effect=lambda self: b"x"
+            ):
+                original = task.current_fingerprint()
+                with patch.object(DitauEffectiveEventPlan, "SCHEMA_VERSION", 99):
+                    bumped = task.current_fingerprint()
+
+            self.assertNotEqual(original, bumped)
+
 
 class DitauProductionPlanTests(unittest.TestCase):
     def test_requires_higgsdna_environment(self):

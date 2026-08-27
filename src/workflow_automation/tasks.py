@@ -460,6 +460,13 @@ class DitauInputPreparation(law.WrapperTask):
 class DitauEffectiveEventPlan(law.Task):
     """Plan, but never execute, the two effective-event batch submissions."""
 
+    # The fingerprint below covers the plan's inputs: configuration, the HiggsDNA
+    # commit, and the sample manifest. It cannot cover the code that generates the
+    # plan, so a change to what a command contains would otherwise leave an existing
+    # plan looking current and silently keep using the old commands. Bump this
+    # whenever the generated plan's structure or command content changes.
+    SCHEMA_VERSION = 2
+
     production = luigi.Parameter(default="cp_2022_test")
     era = luigi.Parameter(default="Run3_2022")
     config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
@@ -531,6 +538,7 @@ class DitauEffectiveEventPlan(law.Task):
                 {
                     "era": str(self.era),
                     "effective_output": production["effective_output"],
+                    "schema_version": self.SCHEMA_VERSION,
                 },
                 sort_keys=True,
             ).encode()
@@ -631,7 +639,7 @@ class DitauEffectiveEventPlan(law.Task):
             )
 
         plan = {
-            "schema_version": 1,
+            "schema_version": self.SCHEMA_VERSION,
             "production": str(self.production),
             "era": str(self.era),
             "effective_output": production["effective_output"],
