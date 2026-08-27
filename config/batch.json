@@ -1,0 +1,44 @@
+{
+  "sites": {
+    "imperial": {
+      "description": "Imperial HEP HTCondor. Memory is per slot, so a job needing more memory than one slot provides must request more cores.",
+      "runtime_attribute": "+MaxRuntime",
+      "node_classes": [
+        {
+          "name": "short",
+          "max_runtime_seconds": 10800,
+          "memory_per_slot_mb": 8000
+        },
+        {
+          "name": "short-highmem",
+          "max_runtime_seconds": 10800,
+          "memory_per_slot_mb": 12000
+        },
+        {
+          "name": "medium",
+          "max_runtime_seconds": 36000,
+          "memory_per_slot_mb": 4000
+        },
+        {
+          "name": "long",
+          "max_runtime_seconds": 172800,
+          "memory_per_slot_mb": 4000
+        }
+      ],
+      "max_cpus_per_job": 8,
+      "escalation": {
+        "runtime_seconds": [
+          10799,
+          35999,
+          172799
+        ],
+        "memory_mb": [
+          8000,
+          16000,
+          24000
+        ],
+        "max_attempts": 3
+      }
+    }
+  }
+}
