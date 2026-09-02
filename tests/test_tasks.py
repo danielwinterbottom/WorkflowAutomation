@@ -627,6 +627,94 @@ class DitauEffectiveEventResubmissionTests(unittest.TestCase):
                 task.run()
 
 
+class SkipCompletedDatasetsTests(unittest.TestCase):
+    """Widening a production should cost the jobs it adds, not the ones already done."""
+
+    MARKER = "Processing 100% \u2501\u2501 3/3"
+
+    def build(self, root: Path, finished=("DY", "TT"), pending=("BBH_M_1000",)):
+        jobs = root / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        for name in finished:
+            (jobs / f"AN-{name}.sub").write_text("executable = x\nqueue 1\n")
+            (jobs / f"AN-{name}.100.0.out").write_text(f"ok\n{self.MARKER}\n")
+        # a dataset that was submitted but never finished must not be skipped
+        (jobs / "AN-HALF.sub").write_text("executable = x\nqueue 2\n")
+        (jobs / "AN-HALF.100.0.out").write_text(f"ok\n{self.MARKER}\n")
+        (jobs / "AN-HALF.100.1.out").write_text("died\n")
+
+        state = root / ".workflow_automation/productions/test/effective-events/Run3_2022"
+        (state / "submission-records").mkdir(parents=True, exist_ok=True)
+        (state / "submission-records/rec.json").write_text(json.dumps({"jobs_dir": str(jobs)}))
+        (state / "submission-receipts").mkdir(parents=True, exist_ok=True)
+        (state / "submission-receipts/Events.json").write_text(
+            json.dumps({"submission_record": str(state / "submission-records/rec.json")})
+        )
+
+        manifest = root / "samples_MC.json"
+        everything = list(finished) + ["HALF"] + list(pending)
+        manifest.write_text(json.dumps({name: [f"{name}.root"] for name in everything}))
+        analysis = root / "Events.json"
+        analysis.write_text(json.dumps({"samplejson": str(manifest), "year": "Run3_2022"}))
+        return {"tree": "Events", "cwd": str(root),
+                "argv": ["python", "run_analysis.py", "--json-analysis", str(analysis)]}
+
+    def task(self, root: Path):
+        return DitauEffectiveEventSubmission(
+            production="test", era="Run3_2022", tree="Events",
+            allow_submission=True, skip_completed=True, workspace=str(root),
+        )
+
+    def test_finished_datasets_are_left_out(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = self.build(root)
+            narrowed, skipped = self.task(root).narrow_to_outstanding(command)
+
+            self.assertEqual(skipped, ["DY", "TT"])
+            reduced = json.loads(Path(json.loads(
+                Path(narrowed["argv"][3]).read_text())["samplejson"]).read_text())
+            self.assertEqual(sorted(reduced), ["BBH_M_1000", "HALF"])
+
+    def test_a_partly_finished_dataset_is_still_submitted(self):
+        # Skipping it would strand the jobs that never completed.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = self.build(root)
+            _, skipped = self.task(root).narrow_to_outstanding(command)
+            self.assertNotIn("HALF", skipped)
+
+    def test_the_plan_files_are_not_modified(self):
+        # The plan must keep describing the whole production.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = self.build(root)
+            before = (root / "samples_MC.json").read_text()
+            self.task(root).narrow_to_outstanding(command)
+            self.assertEqual((root / "samples_MC.json").read_text(), before)
+
+    def test_nothing_outstanding_is_refused_rather_than_submitted_empty(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = self.build(root, finished=("DY",), pending=())
+            (root / "jobs/AN-HALF.100.1.out").write_text(f"ok\n{self.MARKER}\n")
+            with self.assertRaisesRegex(BootstrapError, "nothing to submit"):
+                self.task(root).narrow_to_outstanding(command)
+
+    def test_a_fresh_production_skips_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest = root / "samples_MC.json"
+            manifest.write_text(json.dumps({"DY": ["a.root"]}))
+            analysis = root / "Events.json"
+            analysis.write_text(json.dumps({"samplejson": str(manifest)}))
+            command = {"tree": "Events", "cwd": str(root),
+                       "argv": ["python", "run_analysis.py", "--json-analysis", str(analysis)]}
+            narrowed, skipped = self.task(root).narrow_to_outstanding(command)
+            self.assertEqual(skipped, [])
+            self.assertEqual(narrowed, command)
+
+
 class ResubmissionGenerationTests(unittest.TestCase):
     """The generated submit files are what the farm actually acts on."""
 

@@ -760,6 +760,11 @@ class DitauEffectiveEventSubmission(law.Task):
     era = luigi.Parameter(default="Run3_2022")
     tree = luigi.ChoiceParameter(choices=("Events", "EventsNotSelected"))
     allow_submission = luigi.BoolParameter(default=False, significant=False)
+    skip_completed = luigi.BoolParameter(
+        default=False,
+        significant=False,
+        description="omit datasets whose jobs already finished in an earlier submission",
+    )
     config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
     productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
@@ -797,6 +802,72 @@ class DitauEffectiveEventSubmission(law.Task):
         if len(matches) != 1:
             raise BootstrapError(f"plan has no unique command for tree {self.tree}")
         return matches[0]
+
+    def completed_datasets(self) -> set[str]:
+        """Datasets whose every job finished in an earlier submission of this tree.
+
+        Widening a production should cost the jobs it adds, not the ones already
+        done. HiggsDNA submits one cluster per dataset, so completeness is
+        naturally per dataset, and the job names carry the dataset after an
+        AN- prefix.
+        """
+        probe = DitauEffectiveEventStatus(
+            production=self.production,
+            era=self.era,
+            tree=self.tree,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+        try:
+            jobs_dir = probe.jobs_directory()
+        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
+            return set()
+        if not jobs_dir.is_dir():
+            return set()
+        classified = probe.classify(jobs_dir)
+        done = set()
+        for job_id, counts in classified["datasets"].items():
+            if counts["completed"] == counts["expected"] and counts["expected"] > 0:
+                done.add(job_id[3:] if job_id.startswith("AN-") else job_id)
+        return done
+
+    def narrow_to_outstanding(self, command: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+        """Point the command at a sample list holding only the unfinished datasets.
+
+        The sample list is named inside the analysis configuration rather than on
+        the command line, so both are rewritten alongside the originals. They are
+        written, not edited in place, so the plan's own files stay exactly as the
+        plan describes them.
+        """
+        done = self.completed_datasets()
+        if not done:
+            return command, []
+
+        analysis_index = command["argv"].index("--json-analysis") + 1
+        analysis_path = Path(command["argv"][analysis_index])
+        analysis = json.loads(analysis_path.read_text())
+        manifest_path = Path(analysis["samplejson"])
+        manifest = json.loads(manifest_path.read_text())
+
+        skipped = sorted(name for name in manifest if name in done)
+        outstanding = {name: files for name, files in manifest.items() if name not in done}
+        if not outstanding:
+            raise BootstrapError(
+                f"every dataset for tree {self.tree} already has complete output; there is "
+                "nothing to submit. Rerun without --skip-completed to submit them again"
+            )
+
+        reduced_manifest = manifest_path.with_name(f"{manifest_path.stem}.outstanding.json")
+        reduced_manifest.write_text(json.dumps(outstanding, indent=2, sort_keys=True) + "\n")
+        analysis["samplejson"] = str(reduced_manifest)
+        reduced_analysis = analysis_path.with_name(f"{analysis_path.stem}.outstanding.json")
+        reduced_analysis.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+
+        argv = list(command["argv"])
+        argv[analysis_index] = str(reduced_analysis)
+        return {**command, "argv": argv}, skipped
 
     @staticmethod
     def command_environment(command: dict[str, object]) -> dict[str, str] | None:
@@ -846,6 +917,9 @@ class DitauEffectiveEventSubmission(law.Task):
             )
         command = self.command()
         command_fingerprint = self.command_fingerprint()
+        skipped: list[str] = []
+        if self.skip_completed:
+            command, skipped = self.narrow_to_outstanding(command)
         intent.parent.mkdir(parents=True, exist_ok=True)
         temporary = intent.with_suffix(".json.tmp")
         temporary.write_text(
@@ -858,6 +932,10 @@ class DitauEffectiveEventSubmission(law.Task):
                     "tree": str(self.tree),
                     "plan_fingerprint": self.plan()["input_fingerprint"],
                     "command_fingerprint": command_fingerprint,
+                    # The plan describes every dataset; this records what was
+                    # actually asked of the farm on this attempt.
+                    "skipped_datasets": skipped,
+                    "executed_argv": command["argv"],
                     "status": "started",
                 },
                 indent=2,
@@ -918,6 +996,8 @@ class DitauEffectiveEventSubmission(law.Task):
             "command_fingerprint": command_fingerprint,
             "submission_record": str(record),
             "submission_record_sha256": sha256_file(record),
+            "skipped_datasets": skipped,
+            "executed_argv": command["argv"],
         }
         self.output().dump(
             json.dumps(receipt, indent=2, sort_keys=True) + "\n", formatter="text"
