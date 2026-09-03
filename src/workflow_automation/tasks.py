@@ -1805,11 +1805,19 @@ class DitauParams(DitauDerivedArtefact):
         }
 
     def command(self) -> list[str]:
+        # params.yaml is analysis specific, unlike the counts: the committed
+        # Run3_2022 file holds no MSSM entries at all. So it takes the
+        # production's own type, and passing it explicitly is also what stops
+        # the script stopping to ask.
+        production = json.loads(Path(self.productions_config).read_text())
+        analysis_type = production["productions"][str(self.production)]["analysis_type"]
         return [
             str(self.environment_python()),
             "scripts/ditau/processing/getParams.py",
             "--year",
             str(self.era),
+            "--analysis-type",
+            str(analysis_type),
         ]
 
 
