@@ -75,6 +75,8 @@ The command reports executable discovery, selected batch-environment indicators,
 metadata, and configured checkout state. Environment-variable values are not printed. Job
 submission is deliberately outside the current project scope.
 
+**If you just want the commands**, see [`docs/quick-start.md`](docs/quick-start.md).
+
 For each automated step alongside its manual equivalent, see
 [`docs/workflow-steps.md`](docs/workflow-steps.md). For operating policy, expected behavior, and
 troubleshooting, see [`docs/operator-guide.md`](docs/operator-guide.md).

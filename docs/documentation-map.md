@@ -36,6 +36,7 @@ not obviously in sync. TIDAL carries a submodule `TauAnalysis/ClassicSVfit` from
 | Document | Covers |
 | --- | --- |
 | [`README.md`](../README.md) | Entry point and controller setup |
+| [`docs/quick-start.md`](quick-start.md) | The commands to run, in order, with no prose |
 | [`docs/project-roadmap.md`](project-roadmap.md) | The three delivery stages |
 | [`docs/workflow-steps.md`](workflow-steps.md) | Automated tasks and their manual equivalents |
 | [`docs/operator-guide.md`](operator-guide.md) | Operating and recovery policy |
