@@ -864,17 +864,24 @@ class DitauEffectiveEventSubmission(law.Task):
             workspace=self.workspace,
             environment_root=self.environment_root,
         )
-        try:
-            jobs_dir = probe.jobs_directory()
-        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
-            return set()
-        if not jobs_dir.is_dir():
-            return set()
-        classified = probe.classify(jobs_dir)
-        done = set()
-        for job_id, counts in classified["datasets"].items():
-            if counts["completed"] == counts["expected"] and counts["expected"] > 0:
-                done.add(job_id[3:] if job_id.startswith("AN-") else job_id)
+        # Every submission record for this tree, not just the current receipt.
+        # Receipts get archived during reconciliation, and depending on one meant
+        # that tidying up the bookkeeping silently destroyed the evidence of what
+        # had already run, so a widened production resubmitted all of it.
+        records = sorted(
+            (probe.state_dir() / "submission-records").glob(f"*__{self.era}__tt__{self.tree}.json")
+        )
+        done: set[str] = set()
+        for record in records:
+            try:
+                jobs_dir = Path(json.loads(record.read_text())["jobs_dir"])
+            except (KeyError, OSError, json.JSONDecodeError):
+                continue
+            if not jobs_dir.is_dir():
+                continue
+            for job_id, counts in probe.classify(jobs_dir)["datasets"].items():
+                if counts["completed"] == counts["expected"] and counts["expected"] > 0:
+                    done.add(job_id[3:] if job_id.startswith("AN-") else job_id)
         return done
 
     def narrow_to_outstanding(self, command: dict[str, object]) -> tuple[dict[str, object], list[str]]:

@@ -673,7 +673,7 @@ class SkipCompletedDatasetsTests(unittest.TestCase):
 
     MARKER = "Processing 100% \u2501\u2501 3/3"
 
-    def build(self, root: Path, finished=("DY", "TT"), pending=("BBH_M_1000",)):
+    def build(self, root: Path, finished=("DY", "TT"), pending=("BBH_M_1000",), receipt=True):
         jobs = root / "jobs"
         jobs.mkdir(parents=True, exist_ok=True)
         for name in finished:
@@ -686,11 +686,15 @@ class SkipCompletedDatasetsTests(unittest.TestCase):
 
         state = root / ".workflow_automation/productions/test/effective-events/Run3_2022"
         (state / "submission-records").mkdir(parents=True, exist_ok=True)
-        (state / "submission-records/rec.json").write_text(json.dumps({"jobs_dir": str(jobs)}))
-        (state / "submission-receipts").mkdir(parents=True, exist_ok=True)
-        (state / "submission-receipts/Events.json").write_text(
-            json.dumps({"submission_record": str(state / "submission-records/rec.json")})
+        (state / "submission-records/01_01_2026__Run3_2022__tt__Events.json").write_text(
+            json.dumps({"jobs_dir": str(jobs)})
         )
+        if receipt:
+            (state / "submission-receipts").mkdir(parents=True, exist_ok=True)
+            (state / "submission-receipts/Events.json").write_text(
+                json.dumps({"submission_record": str(
+                    state / "submission-records/01_01_2026__Run3_2022__tt__Events.json")})
+            )
 
         manifest = root / "samples_MC.json"
         everything = list(finished) + ["HALF"] + list(pending)
@@ -741,6 +745,19 @@ class SkipCompletedDatasetsTests(unittest.TestCase):
             (root / "jobs/AN-HALF.100.1.out").write_text(f"ok\n{self.MARKER}\n")
             with self.assertRaisesRegex(BootstrapError, "nothing to submit"):
                 self.task(root).narrow_to_outstanding(command)
+
+    def test_archiving_the_receipt_does_not_lose_what_already_ran(self):
+        """Reconciliation archives receipts. It must not make finished work invisible.
+
+        Depending on the live receipt meant that tidying the bookkeeping before a
+        widened resubmission silently defeated the skip, and the production
+        resubmitted everything it had already done.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command = self.build(root, receipt=False)
+            _, skipped = self.task(root).narrow_to_outstanding(command)
+            self.assertEqual(skipped, ["DY", "TT"])
 
     def test_a_fresh_production_skips_nothing(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
