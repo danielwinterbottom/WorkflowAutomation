@@ -3,10 +3,18 @@
     "cp_2022_test": {
       "analysis_type": "cp",
       "input_snapshot": "2026-08-25",
-      "eras": ["Run3_2022"],
-      "channels": ["tt", "et", "mt"],
+      "eras": [
+        "Run3_2022"
+      ],
+      "channels": [
+        "tt",
+        "et",
+        "mt"
+      ],
       "output": "output/cp_2022_test",
-      "effective_output": "output/effective/cp_2022_test"
+      "effective_output": "output/effective/cp_2022_test",
+      "effective_analysis_type": "all",
+      "effective_analysis_type_comment": "Effective event counts are a property of the samples, not of the analysis: the sum of generator weights for a dataset is the same whichever analysis reads it. The counts file is shared, so it is discovered over every signal sample while analysis_type still governs which samples the standard analysis processes."
     }
   }
 }

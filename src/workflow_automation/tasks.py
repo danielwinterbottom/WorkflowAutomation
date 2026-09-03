@@ -130,6 +130,11 @@ class DitauSampleManifest(law.Task):
 
     production = luigi.Parameter(default="cp_2022_test")
     era = luigi.Parameter(default="Run3_2022")
+    analysis_type = luigi.OptionalParameter(
+        default=None,
+        description="override the production's signal selection, for artefacts shared "
+        "across analyses",
+    )
     config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
     productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
@@ -158,8 +163,13 @@ class DitauSampleManifest(law.Task):
             "credential": GridCredentialCheck(),
         }
 
+    def selected_analysis_type(self) -> str:
+        if self.analysis_type:
+            return str(self.analysis_type)
+        return str(self.production_config()["analysis_type"])
+
     def state_dir(self) -> Path:
-        return (
+        base = (
             Path(self.workspace).expanduser().resolve()
             / ".workflow_automation"
             / "productions"
@@ -167,6 +177,13 @@ class DitauSampleManifest(law.Task):
             / "sample-manifests"
             / str(self.era)
         )
+        # Only an override gets its own directory, so the production's own
+        # manifest keeps the path everything already refers to.
+        if self.analysis_type and str(self.analysis_type) != str(
+            self.production_config()["analysis_type"]
+        ):
+            return base.with_name(f"{self.era}__{self.analysis_type}")
+        return base
 
     def sample_dir(self) -> Path:
         return self.state_dir() / "samples"
@@ -211,7 +228,7 @@ class DitauSampleManifest(law.Task):
         digest = hashlib.sha256(
             json.dumps(
                 {
-                    "analysis_type": production["analysis_type"],
+                    "analysis_type": self.selected_analysis_type(),
                     "input_snapshot": production["input_snapshot"],
                     "channels": production["channels"],
                     "era": str(self.era),
@@ -263,7 +280,7 @@ class DitauSampleManifest(law.Task):
                 "--year",
                 str(self.era),
                 "--analysis-type",
-                str(production["analysis_type"]),
+                self.selected_analysis_type(),
                 "--output-dir",
                 str(self.sample_dir()),
                 "--strict",
@@ -475,14 +492,39 @@ class DitauEffectiveEventPlan(law.Task):
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
     environment_root = luigi.OptionalParameter(default=None, significant=False)
 
-    def requires(self) -> DitauInputPreparation:
-        return DitauInputPreparation(
-            production=self.production,
-            config=self.config,
-            productions_config=self.productions_config,
-            workspace=self.workspace,
-            environment_root=self.environment_root,
-        )
+    def effective_analysis_type(self) -> str:
+        """Which signal samples the counts cover.
+
+        Effective event counts are a property of the samples rather than of the
+        analysis: the sum of generator weights for a dataset is the same number
+        whichever analysis reads it, and the counts file is shared between them.
+        So it is discovered over every signal sample, while analysis_type keeps
+        governing which samples the standard analysis actually processes.
+        """
+        production = self.production_config()
+        return str(production.get("effective_analysis_type", production["analysis_type"]))
+
+    def sample_manifest_dirname(self) -> str:
+        production = self.production_config()
+        selected = self.effective_analysis_type()
+        if selected != str(production["analysis_type"]):
+            return f"{self.era}__{selected}"
+        return str(self.era)
+
+    def requires(self) -> dict[str, law.Task]:
+        common = {
+            "production": self.production,
+            "config": self.config,
+            "productions_config": self.productions_config,
+            "workspace": self.workspace,
+            "environment_root": self.environment_root,
+        }
+        required: dict[str, law.Task] = {"inputs": DitauInputPreparation(**common)}
+        if self.effective_analysis_type() != str(self.production_config()["analysis_type"]):
+            required["samples"] = DitauSampleManifest(
+                era=self.era, analysis_type=self.effective_analysis_type(), **common
+            )
+        return required
 
     def production_config(self) -> dict[str, object]:
         data = json.loads(Path(self.productions_config).read_text())
@@ -526,7 +568,7 @@ class DitauEffectiveEventPlan(law.Task):
             / "productions"
             / str(self.production)
             / "sample-manifests"
-            / str(self.era)
+            / self.sample_manifest_dirname()
             / "manifest.json"
         )
 
@@ -550,7 +592,9 @@ class DitauEffectiveEventPlan(law.Task):
         return digest.hexdigest()
 
     def complete(self) -> bool:
-        if not self.requires().complete() or not self.output().exists():
+        if not all(item.complete() for item in self.requires().values()):
+            return False
+        if not self.output().exists():
             return False
         try:
             plan = json.loads(Path(self.output().path).read_text())

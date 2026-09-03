@@ -4,7 +4,8 @@
       "Bash(condor_q *)",
       "Bash(condor_config_val *)",
       "Bash(voms-proxy-info *)"
-    ]
+    ],
+    "defaultMode": "auto"
   },
   "hooks": {
     "PreToolUse": [

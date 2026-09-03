@@ -213,6 +213,47 @@ class DitauEffectiveEventPlanTests(unittest.TestCase):
                 self.assertFalse(task.complete())
 
 
+class EffectiveAnalysisTypeTests(unittest.TestCase):
+    """The counts are shared between analyses, so they cover every signal sample."""
+
+    def plan(self, root: Path, production: dict) -> DitauEffectiveEventPlan:
+        config = root / "productions.json"
+        config.write_text(json.dumps({"productions": {"test": production}}))
+        return DitauEffectiveEventPlan(
+            production="test", era="Run3_2022",
+            productions_config=str(config), workspace=str(root),
+        )
+
+    def test_defaults_to_the_production_analysis_type(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plan = self.plan(root, {"analysis_type": "cp", "eras": ["Run3_2022"],
+                                    "effective_output": "out"})
+            self.assertEqual(plan.effective_analysis_type(), "cp")
+            self.assertEqual(plan.sample_manifest_dirname(), "Run3_2022")
+            self.assertNotIn("samples", plan.requires())
+
+    def test_a_wider_selection_gets_its_own_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plan = self.plan(root, {"analysis_type": "cp", "effective_analysis_type": "all",
+                                    "eras": ["Run3_2022"], "effective_output": "out"})
+            self.assertEqual(plan.effective_analysis_type(), "all")
+            # kept apart so widening the counts does not widen the standard analysis
+            self.assertEqual(plan.sample_manifest_dirname(), "Run3_2022__all")
+            self.assertEqual(plan.requires()["samples"].analysis_type, "all")
+
+    def test_the_standard_analysis_still_uses_the_production_type(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            plan = self.plan(root, {"analysis_type": "cp", "effective_analysis_type": "all",
+                                    "eras": ["Run3_2022"], "effective_output": "out"})
+            inputs = plan.requires()["inputs"]
+            self.assertEqual(inputs.production, "test")
+            # DitauInputPreparation builds manifests from the production's own type
+            self.assertNotIn("analysis_type", inputs.param_kwargs)
+
+
 class DitauEffectiveEventSubmissionTests(unittest.TestCase):
     def test_refuses_to_submit_without_explicit_opt_in(self):
         task = DitauEffectiveEventSubmission(
