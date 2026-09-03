@@ -164,6 +164,33 @@ class FailureClassificationTests(unittest.TestCase):
         )
         self.assertEqual(classify_failure(log_text=log), INFRASTRUCTURE)
 
+    def test_the_real_cgroup_memory_hold(self):
+        """The exact text this farm writes when a job exceeds its memory request.
+
+        Observed on a real held job. The schedd's SYSTEM_PERIODIC_HOLD policy has
+        no memory condition, which is why memory was first thought to be
+        unenforced here; in fact the startd enforces it through cgroups and holds
+        the job with a message saying neither "exceeded" nor "out of memory", so
+        every pattern written for it missed and a memory kill would never have
+        been retried with more memory.
+        """
+        log = (
+            "012 (1.0.0) Job was held.\n"
+            "\tError from slot1_1@lxcgpu00.hep.ph.ic.ac.uk: Job has gone over cgroup "
+            "memory limit of 87707 megabytes. Last measured usage: 85348 megabytes. "
+            "Consider resubmitting with a higher request_memory.\n"
+        )
+        self.assertEqual(classify_failure(log_text=log), MEMORY)
+
+    def test_a_cgroup_memory_hold_escalates_memory_not_time(self):
+        log = "Job has gone over cgroup memory limit of 8000 megabytes."
+        site = load_site(SITE, "imperial")
+        cause = classify_failure(log_text=log)
+        first, demand = site.next_step(cause, None)
+        bigger, _ = site.next_step(cause, first, demand)
+        self.assertGreater(bigger.memory_mb, first.memory_mb)
+        self.assertEqual(bigger.runtime_seconds, first.runtime_seconds)
+
     def test_a_hold_we_cannot_read_is_not_blindly_retried(self):
         # Holds are how this farm enforces limits. An unrecognised one is a limit
         # we have not learned to read, so retrying unchanged would just hit it again.

@@ -246,6 +246,13 @@ _MEMORY_PATTERNS = (
     re.compile(r"Killed\s*$", re.MULTILINE),
     re.compile(r"std::bad_alloc"),
     re.compile(r"Cannot allocate memory", re.IGNORECASE),
+    # How this farm actually reports it. Memory is not in the schedd's
+    # SYSTEM_PERIODIC_HOLD policy at all; the startd enforces it through cgroups
+    # and holds the job with this message, which says neither "exceeded" nor
+    # "out of memory".
+    re.compile(r"over\s+cgroup\s+memory\s+limit", re.IGNORECASE),
+    re.compile(r"cgroup\s+memory\s+limit", re.IGNORECASE),
+    re.compile(r"higher\s+request_memory", re.IGNORECASE),
 )
 _APPLICATION_PATTERNS = (
     re.compile(r"^Traceback \(most recent call last\)", re.MULTILINE),
@@ -259,10 +266,10 @@ _INFRASTRUCTURE_PATTERNS = (
     re.compile(r"failed to execute", re.IGNORECASE),
     re.compile(r"transfer\s+.*fail", re.IGNORECASE),
 )
-# This schedd holds a job when it exceeds MaxRuntime, when it has started more
-# than three times, or when it has run over an hour below 2% CPU. Notably there
-# is no memory condition, so a job that overruns its memory is never held for it:
-# it is killed inside the slot and says so in its own output instead.
+# The schedd holds a job when it exceeds MaxRuntime, when it has started more
+# than three times, or when it has run over an hour below 2% CPU. Memory is
+# absent from that policy, but it is not unenforced: the startd applies a cgroup
+# limit and holds the job with its own message. Both places have to be read.
 _ATTEMPTS_PATTERNS = (
     re.compile(r"exceeding\s+max\s+run\s+count", re.IGNORECASE),
     re.compile(r"JobRunCount", re.IGNORECASE),

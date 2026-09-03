@@ -50,10 +50,21 @@ authoritative list of what this site holds jobs for:
 || (runtime > 3600 && cpu efficiency < 0.02)    -> no custom message
 ```
 
-**There is no memory condition.** This farm never holds a job for exceeding its memory request, so
-a memory failure can only be recognised from the job's own output: `MemoryError`, `std::bad_alloc`,
-a bare `Killed`, or an allocation failure. Anything looking for memory in a hold reason would wait
-forever.
+**There is no memory condition in that policy** — but memory is not unenforced. It is applied by the
+startd through a cgroup limit, which holds the job with its own message:
+
+```text
+Job has gone over cgroup memory limit of 87707 megabytes.
+Last measured usage: 85348 megabytes. Consider resubmitting with a higher request_memory.
+```
+
+That says neither "exceeded" nor "out of memory", so patterns written from the schedd policy alone
+all missed it, and a memory kill would have been reported as an unreadable hold and never retried
+with more memory. Reading one source and concluding the other did not exist was the mistake; both
+have to be read.
+
+Memory is therefore recognised from that message and from what the job itself reports:
+`MemoryError`, `std::bad_alloc`, a bare `Killed`, or an allocation failure.
 
 The run count limit also bounds resubmission from the outside: a job the schedd has started more
 than three times is held regardless of what we would like to do with it.
