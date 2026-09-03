@@ -1,8 +1,9 @@
 {
   "permissions": {
-    "ask": [
-      "Bash(condor_submit *)",
-      "Bash(condor_rm *)"
+    "allow": [
+      "Bash(condor_q *)",
+      "Bash(condor_config_val *)",
+      "Bash(voms-proxy-info *)"
     ]
   },
   "hooks": {
@@ -12,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.command // \"\"' | grep -qE -- \"--allow-submission|condor_submit|condor_rm\" && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"This command can submit or remove HTCondor batch jobs. Confirm before running.\"}}' || true",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -qE -- \"(^|[;&|(]|&&|\\|\\|)[[:space:]]*condor_(submit|rm)\\b|^[[:space:]]*law[[:space:]]+run\\b.*--allow-submission\" && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"This command submits or removes HTCondor batch jobs. Confirm before running.\"}}' || true",
             "timeout": 10,
             "statusMessage": "Checking for batch submission"
           }
