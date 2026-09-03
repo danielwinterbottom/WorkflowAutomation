@@ -311,6 +311,11 @@ class DitauSampleManifest(law.Task):
 class DitauProductionPlan(law.Task):
     """Build a non-submitting, inspectable plan for a configured ditau production."""
 
+    # As for the effective-event plan: the fingerprint covers the plan's inputs,
+    # not the code that builds it, so a change to what a command contains would
+    # otherwise leave an existing plan looking current. Bump when that changes.
+    SCHEMA_VERSION = 2
+
     production = luigi.Parameter(default="cp_2022_test")
     config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
     productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
@@ -351,6 +356,7 @@ class DitauProductionPlan(law.Task):
             / repositories["HiggsDNA"].directory
         )
         digest = hashlib.sha256(Path(self.productions_config).read_bytes())
+        digest.update(str(self.SCHEMA_VERSION).encode())
         digest.update(run_git(["rev-parse", "HEAD"], cwd=checkout).encode())
         for channel in production["channels"]:
             source = checkout / f"scripts/ditau/config/ditau_analysis_{channel}.json"
@@ -404,14 +410,24 @@ class DitauProductionPlan(law.Task):
                         "EventsNotSelected": False,
                     }
                 )
+                # run.py rewrites this file in place before submitting, to point
+                # samplejson at the channel it is running. It already points there,
+                # so the content is unchanged, but it is rewritten with json.dump's
+                # own formatting. Match that exactly and the rewrite is a no-op
+                # rather than something that makes the plan's own file look edited.
                 target = generated / f"{era}__{channel}.json"
-                target.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+                target.write_text(json.dumps(analysis, indent=4))
                 commands.append(
                     {
                         "stage": "standard-analysis",
                         "era": era,
                         "channel": channel,
                         "submits_jobs": True,
+                        "cwd": str(checkout),
+                        # The generated job wrappers invoke a bare python3 under
+                        # `getenv = True`, so the workers take their interpreter
+                        # from the PATH this process submits with.
+                        "environment_bin": str(python.parent),
                         "argv": [
                             str(python),
                             str(run_script),
@@ -431,7 +447,7 @@ class DitauProductionPlan(law.Task):
                 )
 
         plan = {
-            "schema_version": 1,
+            "schema_version": self.SCHEMA_VERSION,
             "production": self.production,
             "analysis_type": production["analysis_type"],
             "eras": production["eras"],
@@ -1877,3 +1893,290 @@ class DitauStitchingAndParams(law.WrapperTask):
             "environment_root": self.environment_root,
         }
         return [DitauStitching(**common), DitauParams(**common)]
+
+
+class DitauStandardAnalysisReadiness(law.Task):
+    """Validate the standard-analysis prerequisites without submitting anything."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> dict[str, law.Task]:
+        common = {
+            "production": self.production,
+            "config": self.config,
+            "productions_config": self.productions_config,
+            "workspace": self.workspace,
+            "environment_root": self.environment_root,
+        }
+        return {
+            "plan": DitauProductionPlan(**common),
+            # The standard analysis reads the stitching and params built from the
+            # effective-event counts, so they must exist and be current first.
+            # When they already are, nothing upstream runs.
+            "stitching": DitauStitching(era=self.era, **common),
+            "params": DitauParams(era=self.era, **common),
+        }
+
+    def state_dir(self) -> Path:
+        return self.requires()["plan"].state_dir()
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.state_dir() / f"standard-readiness-{self.era}.json"))
+
+    def plan(self) -> dict[str, object]:
+        return json.loads(Path(self.requires()["plan"].output().path).read_text())
+
+    def commands(self) -> list[dict[str, object]]:
+        return [
+            item
+            for item in self.plan()["commands"]
+            if item["stage"] == "standard-analysis" and item["era"] == str(self.era)
+        ]
+
+    def prerequisites_ready(self) -> bool:
+        try:
+            commands = self.commands()
+            if not commands:
+                return False
+            run_program(
+                [commands[0]["argv"][0], commands[0]["argv"][1], "--help"],
+                cwd=Path(commands[0]["cwd"]),
+            )
+        except (BootstrapError, KeyError, IndexError, OSError):
+            return False
+        return (
+            GridCredentialCheck().complete()
+            and shutil.which("condor_submit") is not None
+            and shutil.which("condor_q") is not None
+        )
+
+    def complete(self) -> bool:
+        if not all(item.complete() for item in self.requires().values()):
+            return False
+        if not self.output().exists() or not self.prerequisites_ready():
+            return False
+        try:
+            report = json.loads(Path(self.output().path).read_text())
+            return report["plan_fingerprint"] == self.plan()["input_fingerprint"]
+        except (KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        missing = [name for name in ("condor_submit", "condor_q") if not shutil.which(name)]
+        if missing:
+            raise BootstrapError(f"missing HTCondor tools: {', '.join(missing)}")
+        if not GridCredentialCheck().complete():
+            raise BootstrapError("a CMS proxy valid for at least 5 hours is required")
+        plan = self.plan()
+        commands = self.commands()
+        if not commands:
+            raise BootstrapError(
+                f"the plan has no standard-analysis command for era {self.era}"
+            )
+        expected = set(self.production_channels())
+        if {str(item["channel"]) for item in commands} != expected:
+            raise BootstrapError(
+                "the plan's standard-analysis channels do not match the production"
+            )
+        for item in commands:
+            if not item.get("submits_jobs") or not item.get("environment_bin"):
+                raise BootstrapError(
+                    f"standard-analysis command for {item['channel']} is missing its "
+                    "environment; the workers would inherit the wrong interpreter"
+                )
+        run_program(
+            [commands[0]["argv"][0], commands[0]["argv"][1], "--help"],
+            cwd=Path(commands[0]["cwd"]),
+        )
+        report = {
+            "schema_version": 1,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "plan_fingerprint": plan["input_fingerprint"],
+            "channels": sorted(expected),
+            "checks": {
+                "plan": True,
+                "stitching_and_params": True,
+                "analysis_entrypoint": True,
+                "command_environment": True,
+                "cms_proxy": True,
+                "condor_submit": True,
+                "condor_q": True,
+                "submission_enabled": False,
+            },
+        }
+        self.output().dump(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+
+    def production_channels(self) -> list[str]:
+        data = json.loads(Path(self.productions_config).read_text())
+        return list(data["productions"][str(self.production)]["channels"])
+
+
+class DitauStandardAnalysisSubmission(law.Task):
+    """Submit the standard analysis for one channel, with the usual safeguards."""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    channel = luigi.Parameter()
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauStandardAnalysisReadiness:
+        return DitauStandardAnalysisReadiness(
+            production=self.production,
+            era=self.era,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def state_dir(self) -> Path:
+        return self.requires().state_dir()
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(
+            str(self.state_dir() / "standard-receipts" / f"{self.era}__{self.channel}.json")
+        )
+
+    def intent_path(self) -> Path:
+        return self.state_dir() / "standard-intents" / f"{self.era}__{self.channel}.json"
+
+    def command(self) -> dict[str, object]:
+        matches = [
+            item
+            for item in self.requires().commands()
+            if str(item["channel"]) == str(self.channel)
+        ]
+        if len(matches) != 1:
+            raise BootstrapError(
+                f"the plan has no unique standard-analysis command for channel {self.channel}"
+            )
+        return matches[0]
+
+    def command_fingerprint(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.command(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def complete(self) -> bool:
+        if not self.output().exists():
+            return False
+        try:
+            receipt = json.loads(Path(self.output().path).read_text())
+            record = Path(receipt["submission_record"])
+            return (
+                receipt["plan_fingerprint"] == self.requires().plan()["input_fingerprint"]
+                and receipt["command_fingerprint"] == self.command_fingerprint()
+                and record.is_file()
+                and sha256_file(record) == receipt["submission_record_sha256"]
+            )
+        except (BootstrapError, KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        if not self.allow_submission:
+            raise BootstrapError(
+                "submission is disabled; rerun with --allow-submission only after reviewing "
+                f"{self.state_dir() / 'plan.json'}"
+            )
+        if not self.requires().complete():
+            raise BootstrapError("standard-analysis readiness is no longer valid")
+        intent = self.intent_path()
+        if intent.exists():
+            raise BootstrapError(
+                f"submission intent already exists at {intent}; inspect Condor and reconcile "
+                "it manually before any retry"
+            )
+        command = self.command()
+        command_fingerprint = self.command_fingerprint()
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        temporary = intent.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "plan_fingerprint": self.requires().plan()["input_fingerprint"],
+                    "command_fingerprint": command_fingerprint,
+                    "status": "started",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, intent)
+
+        try:
+            index = command["argv"].index("--submission-manifest-dir") + 1
+            manifest_dir = Path(command["argv"][index])
+            pattern = f"*__{self.era}__{self.channel}__*.json"
+            before = {
+                path: sha256_file(path)
+                for path in manifest_dir.glob(pattern)
+                if path.is_file()
+            }
+            output = run_program(
+                command["argv"],
+                cwd=Path(command["cwd"]),
+                env=DitauEffectiveEventSubmission.command_environment(command),
+            )
+            after = [path for path in manifest_dir.glob(pattern) if path.is_file()]
+            changed = [path for path in after if before.get(path) != sha256_file(path)]
+            if len(changed) != 1:
+                transcript = intent.with_name(f"{self.era}__{self.channel}.command-output.log")
+                transcript.write_text(output + "\n")
+                raise BootstrapError(
+                    f"submission command returned but found {len(changed)} new or changed "
+                    f"records; the command exited successfully, so its captured output was "
+                    f"written to {transcript}; intent retained at {intent}"
+                )
+        except Exception as exc:
+            failed = json.loads(intent.read_text())
+            failed.update(
+                {
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            temporary.write_text(json.dumps(failed, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, intent)
+            raise
+
+        record = changed[0].resolve()
+        receipt = {
+            "schema_version": 1,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "production": str(self.production),
+            "era": str(self.era),
+            "channel": str(self.channel),
+            "plan_fingerprint": self.requires().plan()["input_fingerprint"],
+            "command_fingerprint": command_fingerprint,
+            "submission_record": str(record),
+            "submission_record_sha256": sha256_file(record),
+        }
+        self.output().dump(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n", formatter="text"
+        )
+        completed = json.loads(intent.read_text())
+        completed["status"] = "completed"
+        completed["submission_receipt"] = self.output().path
+        intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
+        print(f"[standard] {self.era} {self.channel}: submitted, record {record.name}")
