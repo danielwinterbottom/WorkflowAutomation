@@ -1732,13 +1732,28 @@ class DitauEffectiveEventCounts(DitauDerivedArtefact):
             raise BootstrapError(f"unknown production {self.production!r}") from exc
 
     def sample_manifest(self) -> Path:
+        """The manifest the counts were actually produced from.
+
+        This must follow the same selection as the effective-event plan. When
+        they disagree the provenance header names inputs that did not produce
+        the file, which is worse than having none: it reads as a guarantee.
+        """
+        production = self.production_config()
+        selected = str(
+            production.get("effective_analysis_type", production["analysis_type"])
+        )
+        directory = (
+            f"{self.era}__{selected}"
+            if selected != str(production["analysis_type"])
+            else str(self.era)
+        )
         return (
             Path(self.workspace).expanduser().resolve()
             / ".workflow_automation"
             / "productions"
             / str(self.production)
             / "sample-manifests"
-            / str(self.era)
+            / directory
             / "samples"
             / "samples_MC.json"
         )

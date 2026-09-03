@@ -9,7 +9,9 @@
       "channels": [
         "tt",
         "et",
-        "mt"
+        "mt",
+        "ee",
+        "mm"
       ],
       "output": "output/cp_2022_test",
       "effective_output": "output/effective/cp_2022_test",

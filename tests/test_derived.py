@@ -38,7 +38,14 @@ class DerivedArtefactTests(unittest.TestCase):
         productions = root / "productions.json"
         productions.write_text(
             json.dumps(
-                {"productions": {"test": {"effective_output": "output/effective/test"}}}
+                {
+                    "productions": {
+                        "test": {
+                            "analysis_type": "cp",
+                            "effective_output": "output/effective/test",
+                        }
+                    }
+                }
             )
         )
         return checkout
@@ -69,6 +76,26 @@ class DerivedArtefactTests(unittest.TestCase):
             self.assertFalse(task.complete())
             provenance.stamp(task.artefact(), task.expected_provenance())
             self.assertTrue(task.complete())
+
+    def test_the_counts_hash_the_manifest_they_were_built_from(self):
+        # The counts cover every signal sample, so they must record the wider
+        # manifest. Recording the production's narrower one would describe inputs
+        # that did not produce the file, which reads as a guarantee and is worse
+        # than recording nothing.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.build(root)
+            config = root / "productions.json"
+            config.write_text(json.dumps({"productions": {"test": {
+                "analysis_type": "cp", "effective_analysis_type": "all",
+                "effective_output": "output/effective/test",
+            }}}))
+            wide = root / ".workflow_automation/productions/test/sample-manifests/Run3_2022__all/samples"
+            wide.mkdir(parents=True)
+            (wide / "samples_MC.json").write_text(json.dumps({"DY": ["a.root"], "BBH": ["b.root"]}))
+
+            task = self.task(DitauEffectiveEventCounts, root)
+            self.assertEqual(task.sample_manifest().parent.parent.name, "Run3_2022__all")
 
     def test_a_changed_sample_manifest_makes_the_counts_stale(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
