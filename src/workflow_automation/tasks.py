@@ -1620,6 +1620,16 @@ class DitauDerivedArtefact(law.Task):
     #: file produced under scripts/ditau/config/<era>/
     artefact_name: str = ""
 
+    def secondary_artefacts(self) -> list[Path]:
+        """Other files the same command writes.
+
+        A task that produces more than one file must protect and stamp all of
+        them. getParams writes a second params file for the filtered Drell-Yan
+        samples, and because that was not declared it was overwritten without
+        the guard ever being consulted.
+        """
+        return []
+
     def checkout(self) -> Path:
         repositories = {item.name: item for item in load_repositories(Path(self.config))}
         return Path(self.workspace).expanduser().resolve() / repositories["HiggsDNA"].directory
@@ -1657,7 +1667,12 @@ class DitauDerivedArtefact(law.Task):
 
     def complete(self) -> bool:
         try:
-            return provenance.matches(self.artefact(), self.expected_provenance())
+            expected = self.expected_provenance()
+            if not provenance.matches(self.artefact(), expected):
+                return False
+            return all(
+                provenance.matches(item, expected) for item in self.secondary_artefacts()
+            )
         except (BootstrapError, OSError):
             return False
 
@@ -1666,7 +1681,9 @@ class DitauDerivedArtefact(law.Task):
 
     def run(self) -> None:
         artefact = self.artefact()
-        provenance.guard_overwrite(artefact, bool(self.allow_overwrite))
+        produced = [artefact, *self.secondary_artefacts()]
+        for item in produced:
+            provenance.guard_overwrite(item, bool(self.allow_overwrite))
         expected = self.expected_provenance()
         environment = dict(os.environ)
         bin_dir = str(self.environment_python().parent)
@@ -1675,8 +1692,10 @@ class DitauDerivedArtefact(law.Task):
         run_program(self.command(), cwd=self.checkout(), env=environment)
         if not artefact.is_file():
             raise BootstrapError(f"{self.command()[1]} did not produce {artefact}")
-        provenance.stamp(artefact, expected)
-        print(f"[derived] {self.era}: wrote {artefact}")
+        for item in produced:
+            if item.is_file():
+                provenance.stamp(item, expected)
+                print(f"[derived] {self.era}: wrote {item}")
 
 
 class DitauEffectiveEventCounts(DitauDerivedArtefact):
@@ -1810,6 +1829,14 @@ class DitauParams(DitauDerivedArtefact):
             "filter_efficiencies": self.config_dir() / "filter_efficiencies.yaml",
             "generator": self.checkout() / "scripts/ditau/processing/getParams.py",
         }
+
+    #: eras for which getParams also writes the filtered Drell-Yan params
+    DY_FILTERED_ERAS = ("Run3_2022", "Run3_2022EE", "Run3_2023", "Run3_2023BPix")
+
+    def secondary_artefacts(self) -> list[Path]:
+        if str(self.era) in self.DY_FILTERED_ERAS:
+            return [self.config_dir() / "params_DYfiltered.yaml"]
+        return []
 
     def command(self) -> list[str]:
         # params.yaml is analysis specific, unlike the counts: the committed

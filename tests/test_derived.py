@@ -110,7 +110,9 @@ class DerivedArtefactTests(unittest.TestCase):
             checkout = self.build(root)
             task = self.task(DitauParams, root)
             (checkout / "scripts/ditau/config/Run3_2022/params.yaml").write_text("DY: 1\n")
-            provenance.stamp(task.artefact(), task.expected_provenance())
+            (checkout / "scripts/ditau/config/Run3_2022/params_DYfiltered.yaml").write_text("DY: 1\n")
+            for item in [task.artefact(), *task.secondary_artefacts()]:
+                provenance.stamp(item, task.expected_provenance())
             self.assertTrue(task.complete())
 
             (checkout / "scripts/ditau/config/Run3_2022/filter_efficiencies.yaml").write_text("a: 2\n")
@@ -142,6 +144,47 @@ class DerivedArtefactTests(unittest.TestCase):
 
             (checkout / "scripts/ditau/processing/getParams.py").write_text("print('v2')\n")
             self.assertTrue(counts.complete())
+
+    def test_the_second_params_file_is_protected_too(self):
+        # getParams writes params_DYfiltered.yaml as well. Not declaring it meant
+        # it was overwritten without the guard ever being consulted.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            checkout = self.build(root)
+            task = self.task(DitauParams, root)
+            (checkout / "scripts/ditau/config/Run3_2022/params.yaml").write_text("DY: 1\n")
+            provenance.stamp(task.artefact(), task.expected_provenance())
+            # somebody else's file, no header
+            second = checkout / "scripts/ditau/config/Run3_2022/params_DYfiltered.yaml"
+            second.write_text("hand written\n")
+            with self.assertRaisesRegex(BootstrapError, "no provenance header"):
+                task.run()
+
+    def test_a_stale_second_file_makes_the_task_incomplete(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            checkout = self.build(root)
+            task = self.task(DitauParams, root)
+            base = checkout / "scripts/ditau/config/Run3_2022"
+            (base / "params.yaml").write_text("DY: 1\n")
+            (base / "params_DYfiltered.yaml").write_text("DY: 1\n")
+            for item in [task.artefact(), *task.secondary_artefacts()]:
+                provenance.stamp(item, task.expected_provenance())
+            self.assertTrue(task.complete())
+
+            # the second file falls behind on its own
+            (base / "params_DYfiltered.yaml").write_text("DY: 2\n")
+            self.assertFalse(task.complete())
+
+    def test_eras_without_a_filtered_file_declare_none(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.build(root)
+            task = DitauParams(
+                production="test", era="Run3_2024", workspace=str(root),
+                productions_config=str(root / "productions.json"),
+            )
+            self.assertEqual(task.secondary_artefacts(), [])
 
     def test_a_file_we_did_not_write_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
