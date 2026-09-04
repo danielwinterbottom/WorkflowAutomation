@@ -93,6 +93,24 @@ class PostProcessingTests(unittest.TestCase):
                 with self.assertRaisesRegex(BootstrapError, "no valid receipt"):
                     task.run()
 
+    def test_a_status_probe_is_not_declared_as_a_requirement(self):
+        """Luigi refuses to run a task whose dependency is unfulfilled.
+
+        The status tasks never report themselves complete, by design, so
+        declaring one as a requirement makes the depending task unrunnable at
+        exactly the moment it is needed. They are consulted directly instead.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for task in (self.merge(root), self.convert(root)):
+                required = task.requires()
+                flat = required if isinstance(required, (list, tuple)) else [required]
+                flat = [item for item in flat if item is not None]
+                self.assertFalse(
+                    any(isinstance(item, DitauStandardAnalysisStatus) for item in flat),
+                    f"{type(task).__name__} must not require a status task",
+                )
+
     def test_the_command_names_the_channel_and_the_record_directory(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

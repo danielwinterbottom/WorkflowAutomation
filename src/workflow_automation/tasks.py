@@ -1376,9 +1376,13 @@ class CondorJobResubmission(law.Task):
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
     environment_root = luigi.OptionalParameter(default=None, significant=False)
 
-    def requires(self) -> DitauEffectiveEventStatus:
-        # Status never reports itself complete, so this always re-probes the jobs
-        # before anything is resubmitted.
+    def status(self) -> DitauEffectiveEventStatus:
+        """A probe, deliberately not a requirement.
+
+        Status never reports itself complete, and Luigi refuses to run a task
+        whose declared dependency is unfulfilled, so requiring it would make
+        resubmission unrunnable at the moment it is needed.
+        """
         return DitauEffectiveEventStatus(
             production=self.production,
             era=self.era,
@@ -1388,9 +1392,6 @@ class CondorJobResubmission(law.Task):
             workspace=self.workspace,
             environment_root=self.environment_root,
         )
-
-    def status(self) -> DitauEffectiveEventStatus:
-        return self.requires()
 
     def state_dir(self) -> Path:
         return self.status().state_dir()
@@ -1690,7 +1691,7 @@ class DitauStandardAnalysisResubmission(CondorJobResubmission):
     channel = luigi.Parameter()
     tree = luigi.Parameter(default="Events", significant=False)
 
-    def requires(self) -> DitauStandardAnalysisStatus:
+    def status(self) -> DitauStandardAnalysisStatus:
         return DitauStandardAnalysisStatus(
             production=self.production,
             era=self.era,
@@ -1702,7 +1703,7 @@ class DitauStandardAnalysisResubmission(CondorJobResubmission):
         )
 
     def state_dir(self) -> Path:
-        return self.requires().state_dir()
+        return self.status().state_dir()
 
     def intent_path(self) -> Path:
         return (
@@ -2336,10 +2337,14 @@ class DitauPostProcessingSubmission(law.Task):
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
     environment_root = luigi.OptionalParameter(default=None, significant=False)
 
-    def requires(self) -> DitauStandardAnalysisStatus:
-        # The events must exist before they can be merged or converted. Status
-        # never reports itself complete, so this re-checks rather than trusting
-        # a receipt that only ever proved submission.
+    def analysis_status(self) -> DitauStandardAnalysisStatus:
+        """A probe for the analysis jobs, deliberately not a requirement.
+
+        The status task never reports itself complete, because job state changes
+        underneath it. Luigi refuses to run a task whose declared dependency is
+        unfulfilled, so asking for it as a requirement makes this task
+        unrunnable. It is consulted directly instead.
+        """
         return DitauStandardAnalysisStatus(
             production=self.production,
             era=self.era,
@@ -2432,7 +2437,7 @@ class DitauPostProcessingSubmission(law.Task):
         produces output that looks complete and is not, which is far harder to
         notice than a refusal.
         """
-        status = self.requires()
+        status = self.analysis_status()
         classified = status.classify(status.jobs_directory())
         totals = classified["totals"]
         if totals["completed"] != totals["expected"]:
@@ -2558,9 +2563,13 @@ class DitauParquetToRoot(DitauPostProcessingSubmission):
     record_suffix = "parquetToRoot"
     state_name = "parquet-to-root"
 
-    def requires(self) -> DitauMergeParquet:
-        # Conversion reads merged.parquet, so merging must have been submitted
-        # and received first.
+    def merge_step(self) -> DitauMergeParquet:
+        """The merge this conversion depends on.
+
+        Kept as a probe rather than a requirement for consistency with the
+        analysis check: both are consulted at run time, and neither should make
+        this task unrunnable by being incomplete.
+        """
         return DitauMergeParquet(
             production=self.production,
             era=self.era,
@@ -2579,7 +2588,7 @@ class DitauParquetToRoot(DitauPostProcessingSubmission):
         files themselves are checked: converting a dataset whose merge never
         finished would silently produce nothing for it.
         """
-        merge = self.requires()
+        merge = self.merge_step()
         if not merge.complete():
             raise BootstrapError(
                 f"the {self.channel} merge has no valid receipt; run DitauMergeParquet first"
@@ -2598,3 +2607,171 @@ class DitauParquetToRoot(DitauPostProcessingSubmission):
                 f"merged.parquet, so the merge has not finished: {', '.join(sorted(unmerged)[:3])}"
                 + (" ..." if len(unmerged) > 3 else "")
             )
+
+
+class TidalControlPlotPlan(law.Task):
+    """Write an inspectable control-plot configuration for one channel.
+
+    The plot definitions are taken from TIDAL's own control scheme rather than
+    invented here: which variables to draw, in which categories, with which
+    method, is analysis knowledge that belongs upstream. Only the paths, the
+    era and the channel are ours to fill in.
+
+    One channel per configuration, so a submission produces exactly one record
+    and a channel's plots can be redone without touching the others.
+    """
+
+    TEMPLATE = "Draw/scripts/config_plot_LateRun3.yaml"
+    SCHEME = "control"
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    channel = luigi.Parameter()
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def production_config(self) -> dict[str, object]:
+        data = json.loads(Path(self.productions_config).read_text())
+        try:
+            return data["productions"][str(self.production)]
+        except KeyError as exc:
+            raise BootstrapError(f"unknown production {self.production!r}") from exc
+
+    def repository(self, name: str) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        if name not in repositories:
+            raise BootstrapError(f"{name} is not a configured repository")
+        return Path(self.workspace).expanduser().resolve() / repositories[name].directory
+
+    def state_dir(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+            / "plots"
+            / str(self.era)
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.state_dir() / f"config__{self.channel}.yaml"))
+
+    def template_path(self) -> Path:
+        return self.repository("TIDAL") / self.TEMPLATE
+
+    def analysis_output(self) -> Path:
+        output = self.production_config().get("output")
+        if not output:
+            raise BootstrapError(f"production {self.production!r} has no output configured")
+        return self.repository("HiggsDNA") / str(output)
+
+    def plot_output(self) -> Path:
+        return self.state_dir() / "output" / str(self.channel)
+
+    def current_fingerprint(self) -> str:
+        digest = hashlib.sha256(self.template_path().read_bytes())
+        digest.update(
+            json.dumps(
+                {
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "input_folder": str(self.analysis_output()),
+                    "parameter_path": str(self.parameter_path()),
+                    "scheme": self.SCHEME,
+                },
+                sort_keys=True,
+            ).encode()
+        )
+        return digest.hexdigest()
+
+    def parameter_path(self) -> Path:
+        # HiggsTauTauPlot reads <parameter_path>/<era>/params.yaml, which is what
+        # the stitching and params step produces.
+        return self.repository("HiggsDNA") / "scripts/ditau/config"
+
+    def complete(self) -> bool:
+        if not self.output().exists():
+            return False
+        try:
+            written = Path(self.output().path).read_text()
+            marker = "# workflow-automation-fingerprint: "
+            for line in written.splitlines():
+                if line.startswith(marker):
+                    return line[len(marker):].strip() == self.current_fingerprint()
+        except OSError:
+            return False
+        return False
+
+    def run(self) -> None:
+        template_path = self.template_path()
+        if not template_path.is_file():
+            raise BootstrapError(f"TIDAL control-plot template is missing: {template_path}")
+        # Parsed with the analysis environment, which has PyYAML; the controller
+        # environment deliberately carries almost nothing.
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        base = (
+            Path(self.environment_root).expanduser().resolve()
+            if self.environment_root
+            else Path(self.workspace).expanduser().resolve() / ".environments"
+        )
+        python = base / repositories["TIDAL"].directory / "bin/python"
+        parameters = {
+            "template": str(template_path),
+            "scheme": self.SCHEME,
+            "channel": str(self.channel),
+            "era": str(self.era),
+            "input_folder": str(self.analysis_output()),
+            "output_path": str(self.plot_output()),
+            "parameter_path": str(self.parameter_path()),
+            "target": self.output().path,
+            "fingerprint": self.current_fingerprint(),
+        }
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        run_program(
+            [str(python), "-c", _CONTROL_PLOT_CONFIG_SCRIPT, json.dumps(parameters)],
+            cwd=self.repository("TIDAL"),
+        )
+        print(f"[plots] {self.era} {self.channel}: wrote {self.output().path}")
+
+
+#: Rendered by the TIDAL environment, which has PyYAML. Kept as a string rather
+#: than a file so the plan stays one task with no side scripts to keep in step.
+_CONTROL_PLOT_CONFIG_SCRIPT = """
+import json, sys, yaml
+
+p = json.loads(sys.argv[1])
+template = yaml.safe_load(open(p["template"]))
+scheme, channel = p["scheme"], p["channel"]
+
+if scheme not in template:
+    raise SystemExit(f"the template has no {scheme!r} scheme")
+source = template[scheme]
+if channel not in source:
+    raise SystemExit(
+        f"the template's {scheme!r} scheme defines no plots for channel {channel!r}"
+    )
+
+config = {
+    "input_folder": p["input_folder"],
+    "output_path": p["output_path"],
+    "channels": [channel],
+    "eras": [p["era"]],
+    "parameter_path": p["parameter_path"],
+    "schemes": [scheme],
+    # A first pass over the control regions, so no systematic variations.
+    "run_systematics": False,
+    scheme: {
+        "variable_definitions": source["variable_definitions"],
+        channel: source[channel],
+    },
+}
+
+with open(p["target"], "w") as handle:
+    handle.write("# workflow-automation-fingerprint: " + p["fingerprint"] + "\\n")
+    handle.write(
+        "# Generated from " + p["template"] + ", control scheme, channel " + channel + ".\\n"
+    )
+    yaml.safe_dump(config, handle, default_flow_style=False, sort_keys=False)
+"""
