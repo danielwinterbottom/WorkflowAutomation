@@ -38,6 +38,12 @@ class Repository:
     pip_install_dependencies: bool = True
     import_name: str | None = None
     validation_imports: tuple[str, ...] = ()
+    #: extra variables the repository needs at runtime, such as an external ROOT
+    environment_variables: tuple[tuple[str, str], ...] = ()
+    #: commands run in the checkout after installation, as (cwd, argv) pairs
+    build_commands: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: files those commands must produce, checked rather than assumed
+    build_artefacts: tuple[str, ...] = ()
 
 
 def path_summary(path: Path) -> dict[str, object]:
@@ -247,6 +253,14 @@ def load_repositories(config_path: Path) -> list[Repository]:
                     pip_install_dependencies=values.get("pip_install_dependencies", True),
                     import_name=values.get("import_name"),
                     validation_imports=tuple(values.get("validation_imports", ())),
+                    environment_variables=tuple(
+                        sorted(values.get("environment_variables", {}).items())
+                    ),
+                    build_commands=tuple(
+                        (item.get("cwd", "."), tuple(item["argv"]))
+                        for item in values.get("build_commands", ())
+                    ),
+                    build_artefacts=tuple(values.get("build_artefacts", ())),
                 )
             )
         except KeyError as exc:
@@ -403,13 +417,16 @@ def environment_validation_error(
         return f"environment Python is missing: {python}"
     if not repository.import_name:
         return "repository import_name is not configured"
+    environment = runtime_environment(repository, prefix)
     try:
         module_path = run_program(
             [
                 str(python),
                 "-c",
                 f"import {repository.import_name}; print({repository.import_name}.__file__)",
-            ]
+            ],
+            cwd=checkout,
+            env=environment,
         )
     except BootstrapError as exc:
         return f"cannot import {repository.import_name}: {exc}"
@@ -419,10 +436,54 @@ def environment_validation_error(
         return f"{repository.import_name} resolves outside the managed checkout: {module_path}"
     for import_name in repository.validation_imports:
         try:
-            run_program([str(python), "-c", f"import {import_name}"])
+            run_program([str(python), "-c", f"import {import_name}"], cwd=checkout, env=environment)
         except BootstrapError as exc:
             return f"cannot import validation module {import_name}: {exc}"
+    for artefact in repository.build_artefacts:
+        if not (checkout / artefact).is_file():
+            return f"build artefact is missing, the environment needs rebuilding: {artefact}"
     return None
+
+
+def runtime_environment(repository: Repository, prefix: Path) -> dict[str, str]:
+    """The environment this repository needs to run.
+
+    The declared variables are expanded against each other in order, so a
+    repository can name an external installation once and derive its paths from
+    it. They are prepended to any existing value rather than replacing it, which
+    is what lets an external ROOT sit alongside the environment's own Python.
+
+    Declaring them beats sourcing a setup script: ROOT's thisroot.sh locates
+    itself by searching the calling script's words with `which`, which does not
+    survive being run from a non-interactive multi-line shell.
+    """
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join(
+        [str(prefix / "bin"), *(p for p in environment.get("PATH", "").split(os.pathsep) if p)]
+    )
+    for name, value in repository.environment_variables:
+        expanded = os.path.expandvars(value.replace("${PREFIX}", str(prefix)))
+        if name in ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH") and environment.get(name):
+            environment[name] = f"{expanded}{os.pathsep}{environment[name]}"
+        else:
+            environment[name] = expanded
+    return environment
+
+
+def run_build_commands(repository: Repository, checkout: Path, prefix: Path) -> None:
+    """Run whatever the repository must compile before it can be used."""
+    if not repository.build_commands:
+        return
+    environment = runtime_environment(repository, prefix)
+    for relative_cwd, argv in repository.build_commands:
+        directory = (checkout / relative_cwd).resolve()
+        print(f"[build] {repository.name}: {' '.join(argv)} in {directory}")
+        run_program(list(argv), cwd=directory, env=environment)
+    missing = [item for item in repository.build_artefacts if not (checkout / item).is_file()]
+    if missing:
+        raise BootstrapError(
+            f"{repository.name} build finished but did not produce: {', '.join(missing)}"
+        )
 
 
 def validate_environment(repository: Repository, checkout: Path, prefix: Path) -> bool:
@@ -487,6 +548,10 @@ def prepare_environment(repository: Repository, workspace: Path, environment_roo
         install_command.extend(["--no-deps", "--no-build-isolation"])
     install_command.extend(["--editable", install_target])
     run_program(install_command, cwd=checkout)
+    # Some repositories compile something before they can be used. Building
+    # before validating means a missing artefact is reported as a build failure
+    # rather than as a confusing import error.
+    run_build_commands(repository, checkout, prefix)
     validation_error = environment_validation_error(repository, checkout, prefix)
     if validation_error:
         raise BootstrapError(

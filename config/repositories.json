@@ -13,6 +13,39 @@
         "pkg_resources",
         "uproot"
       ]
+    },
+    "TIDAL": {
+      "url": "git@github.com:Imperial-HiggsTauTau-Group/TIDAL.git",
+      "revision": "workflowautomation",
+      "commit": "7ba873f9afb4afc14d1f4bce45af78d2cd31775b",
+      "directory": "TIDAL",
+      "environment_file": "environment.yml",
+      "pip_install_dependencies": false,
+      "import_name": "Draw",
+      "validation_imports": [
+        "ROOT",
+        "coffea",
+        "pyarrow"
+      ],
+      "environment_variables": {
+        "ROOTSYS": "/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.32.02/x86_64-almalinux9.4-gcc114-opt",
+        "PATH": "/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.32.02/x86_64-almalinux9.4-gcc114-opt/bin",
+        "LD_LIBRARY_PATH": "/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.32.02/x86_64-almalinux9.4-gcc114-opt/lib",
+        "PYTHONPATH": "/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.32.02/x86_64-almalinux9.4-gcc114-opt/lib"
+      },
+      "environment_variables_comment": "ROOT is external, from cvmfs. Declared rather than sourced: thisroot.sh locates itself by searching the calling script's words with `which`, which does not survive a non-interactive multi-line shell.",
+      "build_commands": [
+        {
+          "cwd": "Draw",
+          "argv": [
+            "make",
+            "-j8"
+          ]
+        }
+      ],
+      "build_artefacts": [
+        "Draw/lib/libMultiDraw.so"
+      ]
     }
   }
 }
