@@ -21,6 +21,7 @@ from workflow_automation.cli import (
     load_repositories,
     prepare_environment,
     prepare_repository,
+    runtime_environment,
     repository_is_current,
     run_git,
     run_program,
@@ -2775,3 +2776,204 @@ with open(p["target"], "w") as handle:
     )
     yaml.safe_dump(config, handle, default_flow_style=False, sort_keys=False)
 """
+
+
+class TidalControlPlotSubmission(law.Task):
+    """Submit one channel's control plots, with the usual safeguards.
+
+    TIDAL submits one job per variable, so a channel is a few dozen jobs rather
+    than a few thousand. It is still gated: the plots read the ROOT files, and
+    submitting before those exist produces jobs that find nothing.
+    """
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    channel = luigi.Parameter()
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> TidalControlPlotPlan:
+        return TidalControlPlotPlan(
+            production=self.production,
+            era=self.era,
+            channel=self.channel,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def plan(self) -> TidalControlPlotPlan:
+        return self.requires()
+
+    def state_dir(self) -> Path:
+        return self.plan().state_dir()
+
+    def records_dir(self) -> Path:
+        return self.state_dir() / "plot-records"
+
+    def record_pattern(self) -> str:
+        return f"*__{self.era}__{self.channel}__plots.json"
+
+    def intent_path(self) -> Path:
+        return self.state_dir() / "plot-intents" / f"{self.channel}.json"
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(str(self.state_dir() / "plot-receipts" / f"{self.channel}.json"))
+
+    def environment_bin(self) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        base = (
+            Path(self.environment_root).expanduser().resolve()
+            if self.environment_root
+            else Path(self.workspace).expanduser().resolve() / ".environments"
+        )
+        return base / repositories["TIDAL"].directory / "bin"
+
+    def command_environment(self) -> dict[str, str]:
+        """TIDAL's environment, including the external ROOT it needs.
+
+        The generated job scripts source ROOT themselves and then call a bare
+        python3 under `getenv = True`, so the workers take their interpreter
+        from whatever this process submits with.
+        """
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        prefix = self.environment_bin().parent
+        return runtime_environment(repositories["TIDAL"], prefix)
+
+    def command(self) -> list[str]:
+        return [
+            str(self.environment_bin() / "python"),
+            "Draw/scripts/makeDatacards.py",
+            "--config",
+            self.plan().output().path,
+            "--batch",
+            "--submission-manifest-dir",
+            str(self.records_dir()),
+        ]
+
+    def complete(self) -> bool:
+        if not self.output().exists():
+            return False
+        try:
+            receipt = json.loads(Path(self.output().path).read_text())
+            record = Path(receipt["submission_record"])
+            return record.is_file() and sha256_file(record) == receipt["submission_record_sha256"]
+        except (KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def check_precondition(self) -> None:
+        """The ROOT files the plots read must exist, per dataset.
+
+        HiggsTauTauPlot opens <input>/<era>/<channel>/<sample>/nominal/merged.root
+        directly, so a missing conversion is not an error the plot job reports
+        clearly; it simply has nothing for that sample.
+        """
+        plan = self.plan()
+        events = plan.analysis_output() / str(self.era) / str(self.channel)
+        if not events.is_dir():
+            raise BootstrapError(f"no analysis output for {self.channel} at {events}")
+        datasets = [item for item in events.iterdir() if item.is_dir()]
+        missing = [item.name for item in datasets if not any(item.rglob("merged.root"))]
+        if missing:
+            raise BootstrapError(
+                f"{len(missing)} of {len(datasets)} datasets in {self.channel} have no "
+                f"merged.root, so the conversion has not finished: "
+                f"{', '.join(sorted(missing)[:3])}" + (" ..." if len(missing) > 3 else "")
+            )
+        params = plan.parameter_path() / str(self.era) / "params.yaml"
+        if not params.is_file():
+            raise BootstrapError(f"the plots need {params}; run DitauStitchingAndParams first")
+
+    def run(self) -> None:
+        if not self.allow_submission:
+            raise BootstrapError(
+                "plot submission is disabled; rerun with --allow-submission once the "
+                f"configuration at {self.plan().output().path} has been reviewed"
+            )
+        self.check_precondition()
+        intent = self.intent_path()
+        if intent.exists():
+            raise BootstrapError(
+                f"submission intent already exists at {intent}; inspect Condor and reconcile "
+                "it manually before any retry"
+            )
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        self.records_dir().mkdir(parents=True, exist_ok=True)
+        temporary = intent.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "config": self.plan().output().path,
+                    "status": "started",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, intent)
+
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        checkout = Path(self.workspace).expanduser().resolve() / repositories["TIDAL"].directory
+        try:
+            before = {
+                path: sha256_file(path)
+                for path in self.records_dir().glob(self.record_pattern())
+                if path.is_file()
+            }
+            output = run_program(self.command(), cwd=checkout, env=self.command_environment())
+            after = [p for p in self.records_dir().glob(self.record_pattern()) if p.is_file()]
+            changed = [p for p in after if before.get(p) != sha256_file(p)]
+            if len(changed) != 1:
+                transcript = intent.with_name(f"{self.channel}.command-output.log")
+                transcript.write_text(output + "\n")
+                raise BootstrapError(
+                    f"makeDatacards returned but found {len(changed)} new or changed records; "
+                    f"its captured output is at {transcript}; intent retained at {intent}"
+                )
+        except Exception as exc:
+            failed = json.loads(intent.read_text())
+            failed.update(
+                {
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            temporary.write_text(json.dumps(failed, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, intent)
+            raise
+
+        record = changed[0].resolve()
+        self.output().dump(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "submitted_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "config": self.plan().output().path,
+                    "submission_record": str(record),
+                    "submission_record_sha256": sha256_file(record),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            formatter="text",
+        )
+        completed = json.loads(intent.read_text())
+        completed["status"] = "completed"
+        intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
+        print(f"[plots] {self.era} {self.channel}: submitted, record {record.name}")
