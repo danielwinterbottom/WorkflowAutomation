@@ -129,3 +129,70 @@ class StandardAnalysisReadinessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StandardAnalysisStatusTests(unittest.TestCase):
+    """The channel must select the jobs, exactly as the tree does for the trees."""
+
+    from workflow_automation.tasks import (
+        DitauEffectiveEventStatus,
+        DitauStandardAnalysisResubmission,
+        DitauStandardAnalysisStatus,
+    )
+
+    def status(self, root: Path, channel="tt"):
+        return self.DitauStandardAnalysisStatus(
+            production="test", era="Run3_2022", channel=channel, workspace=str(root)
+        )
+
+    def test_the_record_pattern_selects_the_channel(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.assertEqual(
+                self.status(root, "ee").record_pattern(), "*__Run3_2022__ee__Events.json"
+            )
+
+    def test_one_channel_does_not_match_another(self):
+        # All five channels write into one records directory, so a loose pattern
+        # would let ee's record vouch for mm's jobs.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            records = root / ".workflow_automation/productions/test/submission-records"
+            records.mkdir(parents=True)
+            for ch in ("tt", "et", "mt", "ee", "mm"):
+                (records / f"03_09_2026__Run3_2022__{ch}__Events.json").write_text("{}")
+            matched = sorted(p.name for p in records.glob(self.status(root, "mm").record_pattern()))
+            self.assertEqual(matched, ["03_09_2026__Run3_2022__mm__Events.json"])
+
+    def test_the_trees_still_select_by_tree(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            probe = self.DitauEffectiveEventStatus(
+                production="test", era="Run3_2022", tree="EventsNotSelected",
+                workspace=str(root),
+            )
+            self.assertEqual(probe.record_pattern(), "*__Run3_2022__tt__EventsNotSelected.json")
+
+    def test_the_two_families_use_separate_directories(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            trees = self.DitauEffectiveEventStatus(
+                production="test", era="Run3_2022", tree="Events", workspace=str(root)
+            ).records_dir()
+            channels = self.status(root).records_dir()
+            self.assertNotEqual(trees, channels)
+            self.assertIn("effective-events", str(trees))
+
+    def test_resubmission_selects_the_channel_command(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            task = self.DitauStandardAnalysisResubmission(
+                production="test", era="Run3_2022", channel="ee", workspace=str(root)
+            )
+            plan = task.plan_path()
+            plan.parent.mkdir(parents=True, exist_ok=True)
+            plan.write_text(json.dumps({"commands": [
+                {"stage": "standard-analysis", "era": "Run3_2022", "channel": c, "argv": [c]}
+                for c in ("tt", "ee", "mm")
+            ]}))
+            self.assertEqual(task.plan_command()["channel"], "ee")

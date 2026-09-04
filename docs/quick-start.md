@@ -64,6 +64,30 @@ law run workflow_automation.tasks.DitauStitchingAndParams \
   --workspace /vols/cms/dw515/WorkflowAutomation/workspaces --local-scheduler
 ```
 
+## The standard analysis, per channel
+
+```bash
+# submit one channel
+law run workflow_automation.tasks.DitauStandardAnalysisSubmission \
+  --production cp_2022_test --era Run3_2022 --channel tt \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --allow-submission --local-scheduler
+
+# did those jobs run? same reporting as the effective-event trees
+law run workflow_automation.tasks.DitauStandardAnalysisStatus \
+  --production cp_2022_test --era Run3_2022 --channel tt \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces --local-scheduler
+
+# only if that reported failures
+law run workflow_automation.tasks.DitauStandardAnalysisResubmission \
+  --production cp_2022_test --era Run3_2022 --channel tt \
+  --workspace /vols/cms/dw515/WorkflowAutomation/workspaces \
+  --allow-submission --local-scheduler
+```
+
+Channels are submitted one at a time on purpose: each gets its own intent, receipt and record, so
+a failure in one is contained and diagnosable rather than mixed into the others.
+
 ## Two flags that mean something
 
 | Flag | Why it exists |

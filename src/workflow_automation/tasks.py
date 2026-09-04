@@ -863,15 +863,9 @@ class DitauEffectiveEventSubmission(law.Task):
             raise BootstrapError(f"plan has no unique command for tree {self.tree}")
         return matches[0]
 
-    def completed_datasets(self) -> set[str]:
-        """Datasets whose every job finished in an earlier submission of this tree.
-
-        Widening a production should cost the jobs it adds, not the ones already
-        done. HiggsDNA submits one cluster per dataset, so completeness is
-        naturally per dataset, and the job names carry the dataset after an
-        AN- prefix.
-        """
-        probe = DitauEffectiveEventStatus(
+    def status_probe(self) -> DitauEffectiveEventStatus:
+        """The status task for this tree, so record naming has one definition."""
+        return DitauEffectiveEventStatus(
             production=self.production,
             era=self.era,
             tree=self.tree,
@@ -880,13 +874,21 @@ class DitauEffectiveEventSubmission(law.Task):
             workspace=self.workspace,
             environment_root=self.environment_root,
         )
+
+    def completed_datasets(self) -> set[str]:
+        """Datasets whose every job finished in an earlier submission of this tree.
+
+        Widening a production should cost the jobs it adds, not the ones already
+        done. HiggsDNA submits one cluster per dataset, so completeness is
+        naturally per dataset, and the job names carry the dataset after an
+        AN- prefix.
+        """
+        probe = self.status_probe()
         # Every submission record for this tree, not just the current receipt.
         # Receipts get archived during reconciliation, and depending on one meant
         # that tidying up the bookkeeping silently destroyed the evidence of what
         # had already run, so a widened production resubmitted all of it.
-        records = sorted(
-            (probe.state_dir() / "submission-records").glob(f"*__{self.era}__tt__{self.tree}.json")
-        )
+        records = sorted(probe.records_dir().glob(probe.record_pattern()))
         done: set[str] = set()
         for record in records:
             try:
@@ -1015,7 +1017,7 @@ class DitauEffectiveEventSubmission(law.Task):
         try:
             manifest_dir_index = command["argv"].index("--submission-manifest-dir") + 1
             manifest_dir = Path(command["argv"][manifest_dir_index])
-            pattern = f"*__{self.era}__tt__{self.tree}.json"
+            pattern = self.status_probe().record_pattern()
             before = {
                 path: sha256_file(path) for path in manifest_dir.glob(pattern) if path.is_file()
             }
@@ -1102,8 +1104,8 @@ class DitauEffectiveEventSubmissions(law.WrapperTask):
         ]
 
 
-class DitauEffectiveEventStatus(law.Task):
-    """Report what happened to a submitted tree's jobs without changing anything.
+class CondorJobStatus(law.Task):
+    """Report what happened to a group of submitted jobs, without changing anything.
 
     A submission receipt proves that jobs were submitted. It says nothing about
     whether they ran. This task closes that gap and never submits, resubmits, or
@@ -1124,6 +1126,25 @@ class DitauEffectiveEventStatus(law.Task):
     productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
     workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
     environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def group_label(self) -> str:
+        """How this group of jobs is named in output, for reports."""
+        return str(self.tree)
+
+    def records_dir(self) -> Path:
+        """Where HiggsDNA wrote the records for this group of jobs."""
+        return self.state_dir() / "submission-records"
+
+    def record_pattern(self) -> str:
+        """Which of those records belong to this group.
+
+        Records are named <date>__<era>__<channel>__<tree>.json. The
+        effective-event trees vary the tree at a fixed channel; the standard
+        analysis varies the channel at a fixed tree. One directory holds several
+        groups, so a pattern that ignored either field would let one group's
+        record vouch for another's jobs.
+        """
+        return f"*__{self.era}__tt__{self.tree}.json"
 
     def state_dir(self) -> Path:
         return (
@@ -1294,14 +1315,50 @@ class DitauEffectiveEventStatus(law.Task):
             f"{count} {cause}" for cause, count in sorted(classified["causes"].items())
         )
         print(
-            f"[status] {self.tree}: {totals['completed']}/{totals['expected']} completed, "
+            f"[status] {self.group_label()}: {totals['completed']}/{totals['expected']} completed, "
             f"{totals['failed']} failed, {pending} pending"
             + (f", {queued} still queued" if queued is not None else ", queue unreadable")
             + (f" | causes: {summary}" if summary else "")
         )
 
 
-class DitauEffectiveEventResubmission(law.Task):
+class DitauEffectiveEventStatus(CondorJobStatus):
+    """The effective-event trees: one channel, two trees."""
+
+
+class DitauStandardAnalysisStatus(CondorJobStatus):
+    """The standard analysis: one tree, one group per channel."""
+
+    channel = luigi.Parameter()
+    tree = luigi.Parameter(default="Events", significant=False)
+
+    def group_label(self) -> str:
+        return f"{self.era} {self.channel}"
+
+    def record_pattern(self) -> str:
+        return f"*__{self.era}__{self.channel}__{self.tree}.json"
+
+    def state_dir(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+        )
+
+    def receipt_path(self) -> Path:
+        return self.state_dir() / "standard-receipts" / f"{self.era}__{self.channel}.json"
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(
+            str(self.state_dir() / "status" / f"standard-{self.era}__{self.channel}.json")
+        )
+
+    def run(self) -> None:
+        super().run()
+
+
+class CondorJobResubmission(law.Task):
     """Resubmit only the jobs that did not finish, with explicit operator opt-in.
 
     Completeness here is defined by the jobs themselves, not by having run a
@@ -1374,17 +1431,25 @@ class DitauEffectiveEventResubmission(law.Task):
             return False
         return self.outstanding(state[1]) == 0
 
+    def plan_path(self) -> Path:
+        return self.state_dir() / "plan.json"
+
+    def plan_selector(self) -> dict[str, str]:
+        """Which planned command produced these jobs."""
+        return {"tree": str(self.tree)}
+
     def plan_command(self) -> dict[str, object]:
-        plan_path = self.state_dir() / "plan.json"
+        plan_path = self.plan_path()
         if not plan_path.is_file():
-            raise BootstrapError(f"effective-event plan is missing: {plan_path}")
+            raise BootstrapError(f"plan is missing: {plan_path}")
+        selector = self.plan_selector()
         matches = [
             item
             for item in json.loads(plan_path.read_text())["commands"]
-            if item["tree"] == str(self.tree)
+            if all(str(item.get(key)) == value for key, value in selector.items())
         ]
         if len(matches) != 1:
-            raise BootstrapError(f"plan has no unique command for tree {self.tree}")
+            raise BootstrapError(f"plan has no unique command for {selector}")
         return matches[0]
 
     DEFAULT_BATCH_CONFIG = DEFAULT_CONFIG.parent / "batch.json"
@@ -1613,6 +1678,56 @@ class DitauEffectiveEventResubmission(law.Task):
             f"[resubmit] {self.tree}: {len(submitted)} job(s) resubmitted, "
             f"{len(skipped)} skipped. Rerun DitauEffectiveEventStatus to see whether they ran."
         )
+
+
+class DitauEffectiveEventResubmission(CondorJobResubmission):
+    """The effective-event trees: one channel, two trees."""
+
+
+class DitauStandardAnalysisResubmission(CondorJobResubmission):
+    """The standard analysis: one tree, one group per channel."""
+
+    channel = luigi.Parameter()
+    tree = luigi.Parameter(default="Events", significant=False)
+
+    def requires(self) -> DitauStandardAnalysisStatus:
+        return DitauStandardAnalysisStatus(
+            production=self.production,
+            era=self.era,
+            channel=self.channel,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def state_dir(self) -> Path:
+        return self.requires().state_dir()
+
+    def intent_path(self) -> Path:
+        return (
+            self.state_dir() / "standard-resubmission-intents"
+            / f"{self.era}__{self.channel}.json"
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(
+            str(
+                self.state_dir() / "standard-resubmission-receipts"
+                / f"{self.era}__{self.channel}.json"
+            )
+        )
+
+    def state_path(self) -> Path:
+        return (
+            self.state_dir() / "standard-resubmission-state"
+            / f"{self.era}__{self.channel}.json"
+        )
+
+    def plan_selector(self) -> dict[str, str]:
+        # the standard analysis varies the channel, not the tree
+        return {"stage": "standard-analysis", "era": str(self.era),
+                "channel": str(self.channel)}
 
 
 class DitauDerivedArtefact(law.Task):
