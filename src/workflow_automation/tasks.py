@@ -2310,3 +2310,291 @@ class DitauStandardAnalysisSubmission(law.Task):
         completed["submission_receipt"] = self.output().path
         intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
         print(f"[standard] {self.era} {self.channel}: submitted, record {record.name}")
+
+
+class DitauPostProcessingSubmission(law.Task):
+    """Base for the batch steps between the analysis and anything reading ROOT.
+
+    Merging and ROOT conversion have the same shape as the analysis submission:
+    one gated command per channel, one durable record, one receipt. They differ
+    only in which script runs and what its record is called.
+    """
+
+    #: script under scripts/ditau/post_processing/
+    script_name: str = ""
+    #: suffix HiggsDNA gives the record it writes
+    record_suffix: str = ""
+    #: name used for this workflow's own state directories
+    state_name: str = ""
+
+    production = luigi.Parameter(default="cp_2022_test")
+    era = luigi.Parameter(default="Run3_2022")
+    channel = luigi.Parameter()
+    allow_submission = luigi.BoolParameter(default=False, significant=False)
+    config = luigi.Parameter(default=str(DEFAULT_CONFIG), significant=False)
+    productions_config = luigi.Parameter(default=str(DEFAULT_PRODUCTIONS), significant=False)
+    workspace = luigi.Parameter(default=str(DEFAULT_WORKSPACE), significant=False)
+    environment_root = luigi.OptionalParameter(default=None, significant=False)
+
+    def requires(self) -> DitauStandardAnalysisStatus:
+        # The events must exist before they can be merged or converted. Status
+        # never reports itself complete, so this re-checks rather than trusting
+        # a receipt that only ever proved submission.
+        return DitauStandardAnalysisStatus(
+            production=self.production,
+            era=self.era,
+            channel=self.channel,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def production_config(self) -> dict[str, object]:
+        data = json.loads(Path(self.productions_config).read_text())
+        try:
+            return data["productions"][str(self.production)]
+        except KeyError as exc:
+            raise BootstrapError(f"unknown production {self.production!r}") from exc
+
+    def checkout(self) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        return Path(self.workspace).expanduser().resolve() / repositories["HiggsDNA"].directory
+
+    def environment_bin(self) -> Path:
+        repositories = {item.name: item for item in load_repositories(Path(self.config))}
+        base = (
+            Path(self.environment_root).expanduser().resolve()
+            if self.environment_root
+            else Path(self.workspace).expanduser().resolve() / ".environments"
+        )
+        return base / repositories["HiggsDNA"].directory / "bin"
+
+    def state_dir(self) -> Path:
+        return (
+            Path(self.workspace).expanduser().resolve()
+            / ".workflow_automation"
+            / "productions"
+            / str(self.production)
+        )
+
+    def records_dir(self) -> Path:
+        return self.state_dir() / f"{self.state_name}-records"
+
+    def record_pattern(self) -> str:
+        return f"*__{self.era}__{self.channel}__{self.record_suffix}.json"
+
+    def intent_path(self) -> Path:
+        return (
+            self.state_dir() / f"{self.state_name}-intents"
+            / f"{self.era}__{self.channel}.json"
+        )
+
+    def output(self) -> law.LocalFileTarget:
+        return law.LocalFileTarget(
+            str(
+                self.state_dir() / f"{self.state_name}-receipts"
+                / f"{self.era}__{self.channel}.json"
+            )
+        )
+
+    def analysis_output(self) -> str:
+        output = self.production_config().get("output")
+        if not output:
+            raise BootstrapError(f"production {self.production!r} has no output configured")
+        return str(output)
+
+    def command(self) -> list[str]:
+        return [
+            str(self.environment_bin() / "python"),
+            f"scripts/ditau/post_processing/{self.script_name}",
+            "--parent_dir",
+            self.analysis_output(),
+            "--years",
+            str(self.era),
+            "--channels",
+            str(self.channel),
+            "--use_condor",
+            "--submission-manifest-dir",
+            str(self.records_dir()),
+        ]
+
+    def command_environment(self) -> dict[str, str]:
+        environment = dict(os.environ)
+        entries = [item for item in environment.get("PATH", "").split(os.pathsep) if item]
+        environment["PATH"] = os.pathsep.join([str(self.environment_bin()), *entries])
+        return environment
+
+    def check_precondition(self) -> None:
+        """Refuse to run on incomplete input.
+
+        Merging or converting a channel whose analysis only partly finished
+        produces output that looks complete and is not, which is far harder to
+        notice than a refusal.
+        """
+        status = self.requires()
+        classified = status.classify(status.jobs_directory())
+        totals = classified["totals"]
+        if totals["completed"] != totals["expected"]:
+            raise BootstrapError(
+                f"the {self.channel} analysis is not complete "
+                f"({totals['completed']}/{totals['expected']} jobs); {self.state_name} would "
+                "work from partial output"
+            )
+
+    def complete(self) -> bool:
+        if not self.output().exists():
+            return False
+        try:
+            receipt = json.loads(Path(self.output().path).read_text())
+            record = Path(receipt["submission_record"])
+            return record.is_file() and sha256_file(record) == receipt["submission_record_sha256"]
+        except (KeyError, OSError, json.JSONDecodeError):
+            return False
+
+    def run(self) -> None:
+        if not self.allow_submission:
+            raise BootstrapError(
+                f"{self.state_name} submission is disabled; rerun with --allow-submission"
+            )
+        self.check_precondition()
+
+        intent = self.intent_path()
+        if intent.exists():
+            raise BootstrapError(
+                f"submission intent already exists at {intent}; inspect Condor and reconcile "
+                "it manually before any retry"
+            )
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        self.records_dir().mkdir(parents=True, exist_ok=True)
+        temporary = intent.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "step": self.state_name,
+                    "status": "started",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        os.replace(temporary, intent)
+
+        try:
+            before = {
+                path: sha256_file(path)
+                for path in self.records_dir().glob(self.record_pattern())
+                if path.is_file()
+            }
+            output = run_program(
+                self.command(), cwd=self.checkout(), env=self.command_environment()
+            )
+            after = [p for p in self.records_dir().glob(self.record_pattern()) if p.is_file()]
+            changed = [p for p in after if before.get(p) != sha256_file(p)]
+            if len(changed) != 1:
+                transcript = intent.with_name(f"{self.era}__{self.channel}.command-output.log")
+                transcript.write_text(output + "\n")
+                raise BootstrapError(
+                    f"{self.script_name} returned but found {len(changed)} new or changed "
+                    f"records; its captured output is at {transcript}; intent retained at {intent}"
+                )
+        except Exception as exc:
+            failed = json.loads(intent.read_text())
+            failed.update(
+                {
+                    "status": "failed",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            temporary.write_text(json.dumps(failed, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, intent)
+            raise
+
+        record = changed[0].resolve()
+        self.output().dump(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "submitted_at": datetime.now(timezone.utc).isoformat(),
+                    "production": str(self.production),
+                    "era": str(self.era),
+                    "channel": str(self.channel),
+                    "step": self.state_name,
+                    "submission_record": str(record),
+                    "submission_record_sha256": sha256_file(record),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            formatter="text",
+        )
+        completed = json.loads(intent.read_text())
+        completed["status"] = "completed"
+        intent.write_text(json.dumps(completed, indent=2, sort_keys=True) + "\n")
+        print(f"[{self.state_name}] {self.era} {self.channel}: submitted, record {record.name}")
+
+
+class DitauMergeParquet(DitauPostProcessingSubmission):
+    """Step 8: merge the per-file parquet into one file per dataset."""
+
+    script_name = "merge_parquet.py"
+    record_suffix = "merge"
+    state_name = "merge"
+
+
+class DitauParquetToRoot(DitauPostProcessingSubmission):
+    """Step 12: convert the merged parquet into the ROOT files TIDAL reads."""
+
+    script_name = "convert_parquet_to_root.py"
+    record_suffix = "parquetToRoot"
+    state_name = "parquet-to-root"
+
+    def requires(self) -> DitauMergeParquet:
+        # Conversion reads merged.parquet, so merging must have been submitted
+        # and received first.
+        return DitauMergeParquet(
+            production=self.production,
+            era=self.era,
+            channel=self.channel,
+            allow_submission=self.allow_submission,
+            config=self.config,
+            productions_config=self.productions_config,
+            workspace=self.workspace,
+            environment_root=self.environment_root,
+        )
+
+    def check_precondition(self) -> None:
+        """The merge must have been submitted and received, not merely attempted.
+
+        Its receipt proves submission rather than completion, so the merged
+        files themselves are checked: converting a dataset whose merge never
+        finished would silently produce nothing for it.
+        """
+        merge = self.requires()
+        if not merge.complete():
+            raise BootstrapError(
+                f"the {self.channel} merge has no valid receipt; run DitauMergeParquet first"
+            )
+        produced = self.checkout() / self.analysis_output() / str(self.era) / str(self.channel)
+        if not produced.is_dir():
+            raise BootstrapError(f"no analysis output to convert at {produced}")
+        datasets = [item for item in produced.iterdir() if item.is_dir()]
+        unmerged = [
+            item.name for item in datasets
+            if not any(item.rglob("merged.parquet"))
+        ]
+        if unmerged:
+            raise BootstrapError(
+                f"{len(unmerged)} of {len(datasets)} datasets in {self.channel} have no "
+                f"merged.parquet, so the merge has not finished: {', '.join(sorted(unmerged)[:3])}"
+                + (" ..." if len(unmerged) > 3 else "")
+            )
