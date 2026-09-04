@@ -123,3 +123,74 @@ class PostProcessingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowOutputTests(unittest.TestCase):
+    """Products are named for the workflow that made them, not where they landed."""
+
+    def test_workflows_over_one_production_sit_side_by_side(self):
+        from workflow_automation.tasks import workflow_output
+        plots = workflow_output("cp_2022_test", "control-plots")
+        cards = workflow_output("cp_2022_test", "datacards")
+        self.assertEqual(plots.parent, cards.parent)
+        self.assertEqual(plots.parent.name, "cp_2022_test")
+        self.assertEqual(plots.name, "control-plots")
+
+    def test_productions_do_not_share_a_directory(self):
+        from workflow_automation.tasks import workflow_output
+        self.assertNotEqual(
+            workflow_output("cp_2022_test", "control-plots"),
+            workflow_output("cp_2023_test", "control-plots"),
+        )
+
+    def test_a_production_may_place_its_output_elsewhere(self):
+        # Products can be large; a production should be able to put them on
+        # whichever filesystem has room without moving the workflow.
+        from workflow_automation.tasks import workflow_output
+        self.assertTrue(
+            str(workflow_output("test", "control-plots", "/vols/elsewhere")).startswith(
+                "/vols/elsewhere"
+            )
+        )
+
+    def test_the_plan_uses_the_named_workflow_directory(self):
+        from workflow_automation.tasks import TidalControlPlotPlan
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "productions.json"
+            config.write_text(json.dumps({"productions": {"test": {
+                "analysis_type": "cp", "output": "output/test", "eras": ["Run3_2022"],
+            }}}))
+            plan = TidalControlPlotPlan(
+                production="test", era="Run3_2022", channel="mm",
+                productions_config=str(config), workspace=str(root),
+            )
+            out = plan.plot_output()
+            # era, scheme and channel are appended by makeDatacards itself
+            self.assertEqual(out.parts[-2:], ("test", "control-plots"))
+
+
+class PlotPlanFingerprintTests(unittest.TestCase):
+    def plan(self, root: Path, output_root=None):
+        from workflow_automation.tasks import TidalControlPlotPlan
+        config = root / "productions.json"
+        production = {"analysis_type": "cp", "output": "output/test", "eras": ["Run3_2022"]}
+        if output_root:
+            production["output_root"] = output_root
+        config.write_text(json.dumps({"productions": {"test": production}}))
+        return TidalControlPlotPlan(
+            production="test", era="Run3_2022", channel="mm",
+            productions_config=str(config), workspace=str(root),
+        )
+
+    def test_moving_the_output_rebuilds_the_configuration(self):
+        # Otherwise the configuration keeps naming somewhere the products are not.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            template = root / "TIDAL/Draw/scripts/config_plot_LateRun3.yaml"
+            template.parent.mkdir(parents=True)
+            template.write_text("control: {}\n")
+            with patch.object(type(self.plan(root)), "template_path", return_value=template):
+                here = self.plan(root).current_fingerprint()
+                elsewhere = self.plan(root, "/vols/elsewhere").current_fingerprint()
+            self.assertNotEqual(here, elsewhere)

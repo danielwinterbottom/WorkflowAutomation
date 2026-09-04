@@ -31,6 +31,18 @@ from workflow_automation.cli import (
 
 DEFAULT_PRODUCTIONS = DEFAULT_CONFIG.parent / "productions.json"
 
+#: Where analysis products are written, as opposed to the bookkeeping under
+#: .workflow_automation. Laid out by production and then by workflow, so several
+#: workflows over the same production sit beside each other and each is named
+#: for what produced it rather than for where it happened to land.
+DEFAULT_OUTPUT_ROOT = DEFAULT_CONFIG.parent.parent / "output"
+
+
+def workflow_output(production: str, workflow: str, root: str | None = None) -> Path:
+    """Directory for one workflow's products within one production."""
+    base = Path(root).expanduser().resolve() if root else DEFAULT_OUTPUT_ROOT
+    return base / str(production) / str(workflow)
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -2624,6 +2636,8 @@ class TidalControlPlotPlan(law.Task):
 
     TEMPLATE = "Draw/scripts/config_plot_LateRun3.yaml"
     SCHEME = "control"
+    #: names this workflow's output directory, so products say what made them
+    WORKFLOW = "control-plots"
 
     production = luigi.Parameter(default="cp_2022_test")
     era = luigi.Parameter(default="Run3_2022")
@@ -2669,7 +2683,15 @@ class TidalControlPlotPlan(law.Task):
         return self.repository("HiggsDNA") / str(output)
 
     def plot_output(self) -> Path:
-        return self.state_dir() / "output" / str(self.channel)
+        """The workflow's output root, not a per-channel directory.
+
+        makeDatacards appends <era>/<scheme>/<channel> of its own, so naming
+        those here would nest them twice.
+        """
+        production = self.production_config()
+        return workflow_output(
+            str(self.production), self.WORKFLOW, production.get("output_root")
+        )
 
     def current_fingerprint(self) -> str:
         digest = hashlib.sha256(self.template_path().read_bytes())
@@ -2679,6 +2701,10 @@ class TidalControlPlotPlan(law.Task):
                     "era": str(self.era),
                     "channel": str(self.channel),
                     "input_folder": str(self.analysis_output()),
+                    # Where the products go is part of what the configuration
+                    # says, so moving them must rebuild it rather than leaving a
+                    # configuration that names somewhere they no longer are.
+                    "output_path": str(self.plot_output()),
                     "parameter_path": str(self.parameter_path()),
                     "scheme": self.SCHEME,
                 },

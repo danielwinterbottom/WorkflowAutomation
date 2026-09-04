@@ -3,3 +3,5 @@ __pycache__/
 *.egg-info/
 .venv/
 workspaces/
+# analysis products, named by production and workflow
+output/
